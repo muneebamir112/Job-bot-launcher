@@ -2,16 +2,19 @@
 Job Bot Launcher
 
 A small GUI with three panels:
-  - "Job Scraper" ("Scrape All Jobs") runs, for every (job title, location)
-    row in Sheet2: GlassD/glassdoor_scraper_final.py, then
-    Hiring_cafe/scraper.py, then Jobgether/jobgether_scraper.py, in that
-    order, before moving to the next row. Each scraper launches its own
-    stealth (patchright) browser, filters to Remote-only / posted within the
-    last 24 hours, skips links that land on a CAPTCHA/verification page, and
-    pushes real job links into Sheet1 as clickable HYPERLINK() cells.
-  - "Generate Resume" runs resume-bot/ollama_generate.py with a job description
-    (auto-fetched from a pasted job posting URL) and a company name, which
-    tailors and renders a .docx resume.
+  - "Scrape All Jobs" runs, for every (job title, location) row in Sheet2:
+    GlassD/glassdoor_scraper_final.py, then Hiring_cafe/scraper.py, then
+    Jobgether/jobgether_scraper.py, in that order, before moving to the next
+    row. Each scraper launches its own stealth (patchright) browser, applies
+    that platform's own "posted within 24h" filter server-side before
+    paginating (instead of paging through everything and discarding old
+    listings afterward), filters to Remote-only, skips links that land on a
+    CAPTCHA/verification page, and pushes each job into Sheet1 as a clickable
+    HYPERLINK() cell as soon as it's found.
+  - "Generate Resumes" reads Company Name + Job Link straight from Sheet1,
+    then for each row without a resume yet runs resume-bot/fetch_jd.py (to
+    fetch the job description) and ollama_generate.py (to tailor and render
+    a .docx resume), one row after another.
   - "Start Applying" runs Job-Bot/main.py, which reads pending job links from
     the Google Sheet and applies to them.
 
@@ -26,6 +29,7 @@ import subprocess
 import sys
 import threading
 import tkinter as tk
+from datetime import datetime
 from tkinter import scrolledtext, ttk
 
 import gspread
@@ -196,6 +200,7 @@ class BotPanel(tk.Frame):
             self.process = subprocess.Popen(
                 cmd,
                 cwd=self.cwd,
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -246,47 +251,147 @@ class BotPanel(tk.Frame):
 
 
 class ResumeBotPanel(BotPanel):
-    """resume-bot needs a job description + company name before it can run.
-    Both are auto-extracted from a pasted job posting URL via resume-bot's
-    own fetch_jd.py, so this panel just takes the URL and builds its command
-    from what fetch_jd.py reports instead of launching a fixed script with
-    no arguments."""
+    """Instead of pasting one job posting URL at a time, this panel reads
+    every row's Company Name + Job Link straight from the same Google Sheet
+    the scrapers fill in, and generates a tailored resume for each one in
+    turn - same "pull the work queue from the sheet" pattern ScraperPanel
+    already uses for job titles. A row is skipped if a resume for that
+    company was already generated (data/<company>_ollama.json exists), so
+    re-running this after new jobs are scraped only processes the new ones."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._stop_requested = False
+        self._thread = None
+        self._current_proc = None
 
     def build_inputs(self, parent):
-        tk.Label(parent, text="Job Posting URL:", fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 9)).pack(anchor="w")
-        self.url_entry = ttk.Entry(parent, style="Dark.TEntry")
-        self.url_entry.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            parent,
+            text="Reads Company Name + Job Link from the Google Sheet\nand generates a resume for each row not done yet.",
+            fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
+        ).pack(anchor="w", pady=(0, 6))
 
-    def build_command(self):
-        url = self.url_entry.get().strip()
+    def is_running(self):
+        return self._thread is not None and self._thread.is_alive()
 
-        if not url:
-            self._append_log("Please enter a job posting URL before generating.\n")
-            return None
+    def start(self):
+        if self.is_running():
+            return
+        self._stop_requested = False
+        self._append_log(f"\n=== Generate Resumes: starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        self.status_label.configure(text="Running...", fg=COLORS["running"])
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
 
-        self._append_log(f"Fetching job description from: {url}\n")
-        fetch = subprocess.run(
-            [sys.executable, "-u", "fetch_jd.py", url],
-            cwd=self.cwd,
-            capture_output=True,
-            text=True,
-        )
-        self._append_log(fetch.stdout)
-        if fetch.returncode != 0:
-            self._append_log(fetch.stderr)
-            self._append_log("Failed to fetch the job description from that URL.\n")
-            return None
+    def stop(self):
+        self._stop_requested = True
+        self._append_log("\n--- Stopping... ---\n")
+        if self._current_proc is not None:
+            try:
+                self._current_proc.terminate()
+            except Exception:
+                pass
 
-        company_match = re.search(r"^Company:\s*(.+)$", fetch.stdout, re.MULTILINE)
-        saved_match = re.search(r"^Saved:\s*(.+)$", fetch.stdout, re.MULTILINE)
-        if not company_match or not saved_match:
-            self._append_log("Could not determine the company name or saved file from fetch_jd.py.\n")
-            return None
+    def terminate_now(self):
+        """Hard stop used when the app window is closing — same purpose as
+        ScraperPanel.terminate_now(), needed here because this panel manages
+        its own subprocess via _current_proc instead of BotPanel's
+        single-shot self.process that on_close() otherwise expects."""
+        self.stop()
 
-        company = company_match.group(1).strip()
-        jd_filename = os.path.basename(saved_match.group(1).strip())
+    def _finish(self):
+        def _do():
+            self.status_label.configure(text="Idle", fg=COLORS["idle"])
+            self.start_btn.configure(state="normal")
+            self.stop_btn.configure(state="disabled")
+        self.after(0, _do)
 
-        return [sys.executable, "-u", "ollama_generate.py", jd_filename, company]
+    @staticmethod
+    def _slugify(text):
+        """Mirrors fetch_jd.py's own slugify() exactly, so the jd_<slug>.txt
+        filename it writes when given an explicit output_name can be
+        predicted here without parsing fetch_jd.py's stdout."""
+        text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
+        return text[:60] or "job"
+
+    def _fetch_jobs(self):
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+        client = gspread.authorize(creds)
+        ws = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        rows = ws.get_all_values()[1:]  # skip header row
+        jobs = []
+        for r in rows:
+            if len(r) < 6:
+                continue
+            company, link = r[1].strip(), r[5].strip()
+            if company and link:
+                jobs.append((company, link))
+        return jobs
+
+    def _run_subprocess(self, cmd):
+        """Run one subprocess to completion, streaming its output into the
+        log box, and return its exit code (or None if Stop was hit)."""
+        try:
+            proc = subprocess.Popen(
+                cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                text=True, bufsize=1,
+            )
+        except Exception as e:
+            self._append_log(f"Failed to launch: {e}\n")
+            return 1
+        self._current_proc = proc
+        for line in proc.stdout:
+            self._append_log(line)
+            if self._stop_requested:
+                proc.terminate()
+        code = proc.wait()
+        self._current_proc = None
+        return None if self._stop_requested else code
+
+    def _run(self):
+        try:
+            jobs = self._fetch_jobs()
+        except Exception as e:
+            self._append_log(f"Failed to read jobs from the Google Sheet: {e}\n")
+            self._finish()
+            return
+
+        self._append_log(f"Loaded {len(jobs)} job(s) with a link from the sheet\n")
+
+        for idx, (company, link) in enumerate(jobs, start=1):
+            if self._stop_requested:
+                break
+
+            data_path = os.path.join(self.cwd, "data", f"{company.lower().replace(' ', '_')}_ollama.json")
+            if os.path.exists(data_path):
+                continue  # already generated a resume for this company
+
+            self._append_log(f"\n--- [{idx}/{len(jobs)}] {company} ---\n")
+
+            self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
+            code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
+            if code is None:
+                break
+            if code != 0:
+                self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
+                continue
+
+            jd_filename = f"jd_{self._slugify(company)}.txt"
+            self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\"\n\n")
+            code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company])
+            if code is None:
+                break
+            if code != 0:
+                self._append_log(f"  Failed to generate a resume for {company}.\n")
+
+        end_label = "stopped" if self._stop_requested else "finished"
+        self._append_log(f"\n=== Generate Resumes: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        self._finish()
 
 
 class ScraperPanel(tk.Frame):
@@ -413,17 +518,25 @@ class ScraperPanel(tk.Frame):
         rows = ws.get_all_values()[1:]  # skip header row
         return [(r[0].strip(), r[1].strip()) for r in rows if len(r) >= 2 and r[0].strip()]
 
+    # If a platform's subprocess produces no output at all for this long, it's
+    # treated as stuck (e.g. its browser crashed and it's waiting forever on a
+    # dead connection) and killed so the batch can move on to the next
+    # platform/title instead of hanging indefinitely.
+    STALL_TIMEOUT_SECONDS = 300
+
     def _run_platform(self, label, cwd, cmd, log_path):
         """Run one platform's scraper as a subprocess, streaming its output
         into the shared log box, this platform's own log file, and the
-        combined scrape_all.log — blocking until it finishes or Stop is hit."""
+        combined scrape_all.log — blocking until it finishes, Stop is hit, or
+        it stalls for STALL_TIMEOUT_SECONDS with no new output."""
         self._log(f"\n$ {' '.join(cmd)}\n\n")
         os.makedirs(os.path.dirname(log_path), exist_ok=True)
         with open(log_path, "a", encoding="utf-8") as platform_fh:
             platform_fh.write(f"$ {' '.join(cmd)}\n\n")
             try:
                 proc = subprocess.Popen(
-                    cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    cmd, cwd=cwd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
                 )
             except Exception as e:
@@ -432,20 +545,53 @@ class ScraperPanel(tk.Frame):
                 platform_fh.write(msg)
                 return
             self._current_proc = proc
-            for line in proc.stdout:
+
+            line_queue = queue.Queue()
+
+            def _reader():
+                for line in proc.stdout:
+                    line_queue.put(line)
+                line_queue.put(None)  # sentinel: process's stdout closed
+
+            threading.Thread(target=_reader, daemon=True).start()
+
+            stalled = False
+            while True:
+                if self._stop_requested:
+                    proc.terminate()
+                    break
+                try:
+                    line = line_queue.get(timeout=self.STALL_TIMEOUT_SECONDS)
+                except queue.Empty:
+                    stalled = True
+                    msg = (
+                        f"\n--- {label} produced no output for "
+                        f"{self.STALL_TIMEOUT_SECONDS // 60} minutes, "
+                        f"terminating (likely stuck) ---\n"
+                    )
+                    self._log(msg)
+                    platform_fh.write(msg)
+                    proc.terminate()
+                    break
+                if line is None:
+                    break
                 self._log(line)
                 platform_fh.write(line)
                 platform_fh.flush()
-                if self._stop_requested:
-                    proc.terminate()
-            code = proc.wait()
+
+            try:
+                code = proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                code = proc.wait()
             self._current_proc = None
-            msg = f"\n--- {label} finished (exit code {code}) ---\n"
-            self._log(msg)
-            platform_fh.write(msg)
+            if not stalled:
+                msg = f"\n--- {label} finished (exit code {code}) ---\n"
+                self._log(msg)
+                platform_fh.write(msg)
 
     def _run(self):
-        self._log("\n=== Scrape All: starting ===\n")
+        self._log(f"\n=== Scrape All: starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         try:
             titles = self._fetch_titles()
         except Exception as e:
@@ -488,7 +634,8 @@ class ScraperPanel(tk.Frame):
                 os.path.join(LOGS_DIR, "jobgether.log"),
             )
 
-        self._log("\n=== Scrape All: finished ===\n" if not self._stop_requested else "\n=== Scrape All: stopped ===\n")
+        end_label = "stopped" if self._stop_requested else "finished"
+        self._log(f"\n=== Scrape All: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         self._finish()
 
 
@@ -542,8 +689,9 @@ def main():
     scraper_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
     resume_panel = ResumeBotPanel(
-        container, "Resume Bot", "Generate Resume",
+        container, "Resume Bot", "Generate Resumes",
         "ollama_generate.py", RESUMEBOT_DIR,
+        log_file=os.path.join(LOGS_DIR, "resume_bot.log"),
     )
     resume_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
@@ -555,9 +703,9 @@ def main():
 
     def on_close():
         scraper_panel.terminate_now()
-        for panel in (resume_panel, apply_panel):
-            if panel.is_running():
-                panel.process.terminate()
+        resume_panel.terminate_now()
+        if apply_panel.is_running():
+            apply_panel.process.terminate()
         root.destroy()
 
     root.protocol("WM_DELETE_WINDOW", on_close)
