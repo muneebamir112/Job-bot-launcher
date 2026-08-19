@@ -2,19 +2,22 @@
 Job Bot Launcher
 
 A small GUI with three panels:
-  - "Scrape All Jobs" runs, for every (job title, location) row in Sheet2:
-    GlassD/glassdoor_scraper_final.py, then Hiring_cafe/scraper.py, then
-    Jobgether/jobgether_scraper.py, in that order, before moving to the next
-    row. Each scraper launches its own stealth (patchright) browser, applies
-    that platform's own "posted within 24h" filter server-side before
-    paginating (instead of paging through everything and discarding old
-    listings afterward), filters to Remote-only, skips links that land on a
-    CAPTCHA/verification page, and pushes each job into Sheet1 as a clickable
-    HYPERLINK() cell as soon as it's found.
+  - "Scrape All Jobs" runs GlassD/glassdoor_scraper_final.py,
+    Hiring_cafe/scraper.py, and Jobgether/jobgether_scraper.py concurrently
+    for each (job title, location) row in Sheet2 in turn, one row at a time
+    (so up to 3 browsers open at once). Every click processes all Sheet2
+    rows from the top; no keyword is skipped for having been scraped in an
+    earlier run. Each scraper launches its own stealth (patchright) browser,
+    applies that platform's own "posted within 24h" filter server-side
+    before paginating (instead of paging through everything and discarding
+    old listings afterward), filters to Remote-only, skips links that land
+    on a CAPTCHA/verification page, and pushes each job into Sheet1 as a
+    clickable HYPERLINK() cell as soon as it's found.
   - "Generate Resumes" reads Company Name + Job Link straight from Sheet1,
-    then for each row without a resume yet runs resume-bot/fetch_jd.py (to
-    fetch the job description) and ollama_generate.py (to tailor and render
-    a .docx resume), one row after another.
+    then for each row without a resume yet (checked against CVS_DIR, not
+    just Sheet1) runs resume-bot/fetch_jd.py (to fetch the job description)
+    and ollama_generate.py (to tailor and render a PDF resume), one row
+    after another, marking the row's Resume column "Generated" on success.
   - "Start Applying" runs Job-Bot/main.py, which reads pending job links from
     the Google Sheet and applies to them.
 
@@ -28,6 +31,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from tkinter import scrolledtext, ttk
@@ -35,12 +39,16 @@ from tkinter import scrolledtext, ttk
 import gspread
 from google.oauth2.service_account import Credentials
 
-GLASSD_DIR = r"C:\Users\Muneeb\Desktop\WebNcodes\scraper\GlassD"
-HIRINGCAFE_DIR = r"C:\Users\Muneeb\Desktop\WebNcodes\scraper\Hiring_cafe"
-JOBGETHER_DIR = r"C:\Users\Muneeb\Desktop\WebNcodes\scraper\Jobgether"
-JOBBOT_DIR = r"C:\Users\Muneeb\Desktop\WebNcodes\Job-Bot"
-RESUMEBOT_DIR = r"C:\Users\Muneeb\Desktop\WebNcodes\resume-bot"
+GLASSD_DIR = r"C:\Users\webNcodes\Desktop\webncodes\scraper\GlassD"
+HIRINGCAFE_DIR = r"C:\Users\webNcodes\Desktop\webncodes\scraper\Hiring_cafe"
+JOBGETHER_DIR = r"C:\Users\webNcodes\Desktop\webncodes\scraper\Jobgether"
+JOBBOT_DIR = r"C:\Users\webNcodes\Desktop\webncodes\Job-Bot"
+RESUMEBOT_DIR = r"C:\Users\webNcodes\Desktop\webncodes\resume-bot"
 LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+# Must match CVS_DIR in resume-bot/ollama_generate.py - that's where the
+# actual rendered resumes end up; used here only to check whether one
+# already exists for a company (see ResumeBotPanel._run).
+CVS_DIR = r"C:\Users\webNcodes\Desktop\CVs"
 
 # Same spreadsheet the scrapers already sync job links into (Sheet1). Sheet2
 # holds the job-title/location queue that "Scrape All Platforms" reads from.
@@ -61,6 +69,34 @@ COLORS = {
     "running": "#3ddc84",
 }
 ACCENT_PALETTE = ["#4f8cff", "#c77dff", "#2dd4bf", "#f5a524", "#3ddc84"]
+
+
+def stamp_log_line(text):
+    """Prefix a log line with its own [YYYY-MM-DD HH:MM:SS] timestamp, so
+    every event in a run's log file shows exactly when it happened,
+    including the date - important since a run can span past midnight.
+    Leading blank lines are preserved as pure spacing ahead of the
+    timestamp rather than having it land after them. Shared by every panel
+    that logs to a per-run file (see BotPanel, ScraperPanel)."""
+    stripped = text.lstrip("\n")
+    leading_newlines = text[:len(text) - len(stripped)]
+    if not stripped:
+        return text
+    return f"{leading_newlines}[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {stripped}"
+
+
+def format_duration(td):
+    """Render a timedelta as e.g. '1h 23m 45s' for end-of-run log lines."""
+    total_seconds = int(td.total_seconds())
+    hours, remainder = divmod(total_seconds, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    parts = []
+    if hours:
+        parts.append(f"{hours}h")
+    if hours or minutes:
+        parts.append(f"{minutes}m")
+    parts.append(f"{seconds}s")
+    return " ".join(parts)
 
 
 def configure_style(root):
@@ -98,6 +134,19 @@ def configure_style(root):
         background=COLORS["panel_bg"], troughcolor=COLORS["bg"],
         bordercolor=COLORS["bg"], arrowcolor=COLORS["text"],
     )
+
+    style.configure(
+        "TNotebook", background=COLORS["panel_bg"], borderwidth=0,
+    )
+    style.configure(
+        "TNotebook.Tab", background=COLORS["input_bg"], foreground=COLORS["text"],
+        padding=(10, 4), borderwidth=0, font=("Segoe UI", 9),
+    )
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", COLORS["border"])],
+        foreground=[("selected", COLORS["text"])],
+    )
     return style
 
 
@@ -108,7 +157,7 @@ class BotPanel(tk.Frame):
 
     _accent_counter = 0
 
-    def __init__(self, parent, title, button_text, script_name, cwd, log_file=None):
+    def __init__(self, parent, title, button_text, script_name, cwd, log_file=None, log_dir=None, log_prefix=None):
         self.accent = ACCENT_PALETTE[BotPanel._accent_counter % len(ACCENT_PALETTE)]
         self._button_style = f"Accent{BotPanel._accent_counter % len(ACCENT_PALETTE)}.TButton"
         BotPanel._accent_counter += 1
@@ -117,15 +166,27 @@ class BotPanel(tk.Frame):
             parent, bg=COLORS["panel_bg"], bd=0,
             highlightthickness=1, highlightbackground=COLORS["border"],
         )
+        self.title = title
         self.cwd = cwd
         self.script_name = script_name
         self.process = None
         self.log_queue = queue.Queue()
+        self._run_start = None
 
-        # Optional: persist this panel's log output to its own file on disk
-        # (e.g. for the scraper panels) in addition to the on-screen log box.
-        # Panels that don't pass log_file behave exactly as before.
+        # Two ways to persist this panel's log output to disk, in addition
+        # to the on-screen log box:
+        #   log_file            - a single file appended to across every run.
+        #   log_dir/log_prefix  - a NEW timestamped file
+        #                         ("<log_prefix>_<start timestamp>.log" in
+        #                         log_dir) created each time Start is
+        #                         clicked, matching ScraperPanel's per-run
+        #                         log files - so each run's own file
+        #                         unambiguously shows when that run started
+        #                         (filename) and ended (its own last line).
+        # Panels that pass neither behave exactly as before (no file logging).
         self._log_fh = None
+        self._log_dir = log_dir
+        self._log_prefix = log_prefix
         if log_file:
             os.makedirs(os.path.dirname(log_file), exist_ok=True)
             self._log_fh = open(log_file, "a", encoding="utf-8")
@@ -137,9 +198,9 @@ class BotPanel(tk.Frame):
             fg=self.accent, bg=COLORS["panel_bg"],
         ).pack(pady=(10, 4))
 
-        self.extra_inputs_frame = tk.Frame(self, bg=COLORS["panel_bg"])
-        self.extra_inputs_frame.pack(fill="x", padx=10)
-        self.build_inputs(self.extra_inputs_frame)
+        extra_inputs_frame = tk.Frame(self, bg=COLORS["panel_bg"])
+        extra_inputs_frame.pack(fill="x", padx=10)
+        self.build_inputs(extra_inputs_frame)
 
         btn_frame = tk.Frame(self, bg=COLORS["panel_bg"])
         btn_frame.pack(pady=6)
@@ -178,12 +239,17 @@ class BotPanel(tk.Frame):
         return [sys.executable, "-u", self.script_name]
 
     def _append_log(self, text):
+        # Panels using the per-run timestamped-file mode stamp every line
+        # (on-screen and in the file) so the file's own content shows
+        # exactly when each event happened; the older single-appended-file
+        # mode (log_file=) leaves text unstamped, matching its prior behavior.
+        display_text = stamp_log_line(text) if self._log_dir else text
         self.log_box.configure(state="normal")
-        self.log_box.insert("end", text)
+        self.log_box.insert("end", display_text)
         self.log_box.see("end")
         self.log_box.configure(state="disabled")
         if self._log_fh:
-            self._log_fh.write(text)
+            self._log_fh.write(display_text)
             self._log_fh.flush()
 
     def start(self):
@@ -192,6 +258,15 @@ class BotPanel(tk.Frame):
         cmd = self.build_command()
         if cmd is None:
             return
+        self._run_start = datetime.now()
+        if self._log_dir and self._log_prefix:
+            os.makedirs(self._log_dir, exist_ok=True)
+            log_path = os.path.join(
+                self._log_dir,
+                f"{self._log_prefix}_{self._run_start.strftime('%Y-%m-%d_%H-%M-%S')}.log",
+            )
+            self._log_fh = open(log_path, "a", encoding="utf-8")
+            self._append_log(f"=== {self.title}: starting ===\n")
         self._append_log(f"$ {' '.join(cmd)}\n\n")
         self.status_label.configure(text="Running...", fg=COLORS["running"])
         self.start_btn.configure(state="disabled")
@@ -208,6 +283,7 @@ class BotPanel(tk.Frame):
             )
         except Exception as e:
             self._append_log(f"Failed to launch: {e}\n")
+            self._close_run_log("failed to launch")
             self.status_label.configure(text="Idle", fg=COLORS["idle"])
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
@@ -219,6 +295,16 @@ class BotPanel(tk.Frame):
             self.log_queue.put(line)
         self.log_queue.put(None)  # sentinel: process ended
 
+    def _close_run_log(self, end_label):
+        """Write this run's end-of-run marker (with total elapsed time) and
+        close its log file - only relevant in the per-run timestamped-file
+        mode (log_dir/log_prefix); a no-op otherwise."""
+        if self._log_dir and self._log_fh is not None:
+            elapsed = format_duration(datetime.now() - self._run_start) if self._run_start else "?"
+            self._append_log(f"\n=== {self.title}: {end_label} (total time: {elapsed}) ===\n")
+            self._log_fh.close()
+            self._log_fh = None
+
     def _poll_queue(self):
         try:
             while True:
@@ -226,6 +312,7 @@ class BotPanel(tk.Frame):
                 if line is None:
                     code = self.process.wait()
                     self._append_log(f"\n--- Finished (exit code {code}) ---\n")
+                    self._close_run_log(f"finished (exit code {code})")
                     self.status_label.configure(text="Idle", fg=COLORS["idle"])
                     self.start_btn.configure(state="normal")
                     self.stop_btn.configure(state="disabled")
@@ -256,8 +343,14 @@ class ResumeBotPanel(BotPanel):
     the scrapers fill in, and generates a tailored resume for each one in
     turn - same "pull the work queue from the sheet" pattern ScraperPanel
     already uses for job titles. A row is skipped if a resume for that
-    company was already generated (data/<company>_ollama.json exists), so
-    re-running this after new jobs are scraped only processes the new ones."""
+    company already exists (CVS_DIR/<company>/Jimmy Tran.pdf), so
+    re-running this after new jobs are scraped only processes the new ones.
+    Once a resume is generated, that row's Resume column (J) is set to
+    "Generated" so it's visible directly in the sheet."""
+
+    # Below this many characters the fetched page almost certainly isn't the
+    # real job description (JS-rendered board, consent wall, 404 shell).
+    MIN_JD_CHARS = 400
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -309,6 +402,24 @@ class ResumeBotPanel(BotPanel):
             self.stop_btn.configure(state="disabled")
         self.after(0, _do)
 
+    def _append_log(self, text):
+        """All of this panel's logging happens on the worker thread, but Tk
+        widgets may only be touched from the main thread — so hand the widget
+        update back to it via after() (same approach as ScraperPanel._log).
+        Writing to the log file is safe here since only one worker runs."""
+        def _do():
+            self.log_box.configure(state="normal")
+            self.log_box.insert("end", text)
+            self.log_box.see("end")
+            self.log_box.configure(state="disabled")
+        self.after(0, _do)
+        if self._log_fh:
+            self._log_fh.write(text)
+            self._log_fh.flush()
+
+    def _set_status(self, text):
+        self.after(0, lambda: self.status_label.configure(text=text, fg=COLORS["running"]))
+
     @staticmethod
     def _slugify(text):
         """Mirrors fetch_jd.py's own slugify() exactly, so the jd_<slug>.txt
@@ -317,20 +428,35 @@ class ResumeBotPanel(BotPanel):
         text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
         return text[:60] or "job"
 
-    def _fetch_jobs(self):
+    # Column J - written "Generated" once a resume for that row's job exists.
+    RESUME_COLUMN = 10
+
+    def _connect_sheet(self):
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
         client = gspread.authorize(creds)
-        ws = client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        return client.open_by_key(GOOGLE_SHEET_ID).sheet1
+
+    def _fetch_jobs(self, ws):
         rows = ws.get_all_values()[1:]  # skip header row
         jobs = []
-        for r in rows:
+        for i, r in enumerate(rows, start=2):  # row 2 is the first data row
             if len(r) < 6:
                 continue
             company, link = r[1].strip(), r[5].strip()
             if company and link:
-                jobs.append((company, link))
+                jobs.append((company, link, i))
         return jobs
+
+    def _sleep_unless_stopped(self, seconds):
+        """Sleep in small increments so Stop still takes effect promptly.
+        Returns True if Stop was hit during the wait."""
+        end = time.monotonic() + seconds
+        while time.monotonic() < end:
+            if self._stop_requested:
+                return True
+            time.sleep(min(0.5, end - time.monotonic()))
+        return self._stop_requested
 
     def _run_subprocess(self, cmd):
         """Run one subprocess to completion, streaming its output into the
@@ -355,40 +481,94 @@ class ResumeBotPanel(BotPanel):
 
     def _run(self):
         try:
-            jobs = self._fetch_jobs()
+            sheet = self._connect_sheet()
+            jobs = self._fetch_jobs(sheet)
         except Exception as e:
             self._append_log(f"Failed to read jobs from the Google Sheet: {e}\n")
             self._finish()
             return
 
-        self._append_log(f"Loaded {len(jobs)} job(s) with a link from the sheet\n")
+        todo = []
+        for company, link, row in jobs:
+            # Check the actual rendered PDF, not the intermediate
+            # data/<company>_ollama.json - that JSON can survive even after
+            # the PDF itself is deleted (or was never rendered due to a
+            # mid-run crash), which was wrongly skipping companies that have
+            # no resume file at all.
+            pdf_path = os.path.join(CVS_DIR, company, "Jimmy Tran.pdf")
+            if not os.path.exists(pdf_path):
+                todo.append((company, link, row))
 
-        for idx, (company, link) in enumerate(jobs, start=1):
+        self._append_log(
+            f"Loaded {len(jobs)} job(s) with a link from the sheet — "
+            f"{len(jobs) - len(todo)} already have a resume, {len(todo)} to generate\n"
+        )
+
+        made = failed = 0
+        for idx, (company, link, row) in enumerate(todo, start=1):
             if self._stop_requested:
                 break
 
-            data_path = os.path.join(self.cwd, "data", f"{company.lower().replace(' ', '_')}_ollama.json")
-            if os.path.exists(data_path):
-                continue  # already generated a resume for this company
+            self._append_log(f"\n--- [{idx}/{len(todo)}] {company} ---\n")
 
-            self._append_log(f"\n--- [{idx}/{len(jobs)}] {company} ---\n")
-
+            self._set_status(f"[{idx}/{len(todo)}] {company} — fetching JD")
             self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
             code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
             if code is None:
                 break
             if code != 0:
+                # fetch_jd.py already retries transient DNS/connection blips
+                # internally; if it still came back non-zero, give it one
+                # more full attempt after a short pause before giving up -
+                # covers network outages that outlast its internal retries.
+                self._append_log(f"  Fetch failed for {company}, retrying once more in 15s...\n")
+                if self._sleep_unless_stopped(15):
+                    break
+                self._append_log(f"$ fetch_jd.py {link} \"{company}\" (retry)\n\n")
+                code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
+                if code is None:
+                    break
+            if code != 0:
                 self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
+                failed += 1
                 continue
 
+            # fetch_jd.py still exits 0 when a JavaScript-rendered page yields
+            # almost no text. Previously this was treated as a skip, but the
+            # user wants every row to get a resume attempt regardless - so
+            # this is now just a heads-up in the log, not a skip.
             jd_filename = f"jd_{self._slugify(company)}.txt"
+            jd_path = os.path.join(self.cwd, jd_filename)
+            try:
+                with open(jd_path, encoding="utf-8") as f:
+                    jd_len = len(f.read().strip())
+            except OSError as e:
+                self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
+                failed += 1
+                continue
+            if jd_len < self.MIN_JD_CHARS:
+                self._append_log(
+                    f"  Job description is only {jd_len} characters (likely a "
+                    f"JavaScript-rendered page); generating a resume from it "
+                    f"anyway.\n"
+                )
+
+            self._set_status(f"[{idx}/{len(todo)}] {company} — generating resume")
             self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\"\n\n")
             code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company])
             if code is None:
                 break
             if code != 0:
                 self._append_log(f"  Failed to generate a resume for {company}.\n")
+                failed += 1
+            else:
+                made += 1
+                try:
+                    sheet.update_cell(row, self.RESUME_COLUMN, "Generated")
+                except Exception as e:
+                    self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
 
+        self._append_log(f"\n{made} resume(s) generated, {failed} skipped/failed\n")
         end_label = "stopped" if self._stop_requested else "finished"
         self._append_log(f"\n=== Generate Resumes: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         self._finish()
@@ -396,18 +576,28 @@ class ResumeBotPanel(BotPanel):
 
 class ScraperPanel(tk.Frame):
     """Single consolidated scraper control, replacing a separate manual panel
-    per platform. One button runs Glassdoor, then Hiring Cafe, then Jobgether
-    — once per (job title, location) row in Sheet2 — before moving to the
-    next row. Each script already applies its own Remote-only, ~24h-old, and
-    CAPTCHA-link-skip filtering internally; this panel only sequences the 3
+    per platform. One button runs Glassdoor, Hiring Cafe, and Jobgether
+    concurrently for a job title/location row from Sheet2 - so up to 3 real
+    Chrome windows can be open at the same time. Rows are processed strictly
+    one at a time (the next keyword doesn't start until the current one's
+    3 platforms all finish), since each platform's browser is launched
+    against one fixed, shared Chrome profile directory that a second
+    concurrent launch of the same platform can't also open. Each script
+    already applies its own Remote-only, ~24h-old, and CAPTCHA-link-skip
+    filtering internally; this panel just sequences/parallelizes the
     subprocesses and fans their output out to the shared log box, each
-    platform's own log file, and a combined scrape_all.log.
+    platform's own log file, and a combined scrape_all_<start timestamp>.log
+    - a new one per run, not appended to across runs, so each run's own file
+    unambiguously shows when that run started (filename) and ended (its own
+    last line).
 
-    Platforms run strictly one at a time, even across different job titles:
-    each launches its own dedicated stealth browser (patchright), and running
-    them one at a time keeps behavior simple and predictable."""
+    Every "Scrape All Jobs" click processes all Sheet2 rows from the top,
+    across all 3 platforms - no keyword is skipped for having been scraped
+    in an earlier run."""
 
     ACCENT = ACCENT_PALETTE[2]
+    # Folder name (under LOGS_DIR) and log-filename slug per platform.
+    PLATFORM_SLUGS = {"Glassdoor": "glassdoor", "Hiring Cafe": "hiring_cafe", "Jobgether": "jobgether"}
 
     def __init__(self, parent):
         super().__init__(
@@ -416,7 +606,10 @@ class ScraperPanel(tk.Frame):
         )
         self._stop_requested = False
         self._thread = None
-        self._current_proc = None
+        self._current_procs = set()  # subprocess.Popen objects currently running, guarded by _procs_lock
+        self._procs_lock = threading.Lock()
+        self._log_lock = threading.Lock()  # guards writes to scrape_all.log AND each platform's own log file, since its 3 platform threads log concurrently
+        self._platform_log_fhs = {}  # label -> open file handle, set up fresh per run in _run()
 
         tk.Frame(self, bg=self.ACCENT, height=3).pack(fill="x", side="top")
 
@@ -426,7 +619,7 @@ class ScraperPanel(tk.Frame):
         ).pack(pady=(10, 2))
         tk.Label(
             self,
-            text="Glassdoor → Hiring Cafe → Jobgether, per Sheet2 title\nRemote · United States · posted within 24h",
+            text="3 platforms in parallel, one keyword at a time\nRemote · United States · posted within 24h",
             fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
         ).pack(pady=(0, 8))
 
@@ -448,15 +641,27 @@ class ScraperPanel(tk.Frame):
         self.status_label = tk.Label(self, text="Idle", fg=COLORS["idle"], bg=COLORS["panel_bg"], font=("Segoe UI", 9))
         self.status_label.pack(pady=(0, 6))
 
-        self.log_box = scrolledtext.ScrolledText(
-            self, width=58, height=28, state="disabled", bg=COLORS["input_bg"], fg=COLORS["text"],
-            insertbackground=COLORS["text"], font=("Consolas", 9), bd=0,
-            highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=self.ACCENT,
-        )
-        self.log_box.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # A separate log tab per platform instead of one shared box, so
+        # concurrent Glassdoor/Hiring Cafe/Jobgether output doesn't interleave
+        # into a single hard-to-read stream.
+        notebook = ttk.Notebook(self)
+        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        self.log_boxes = {}
+        for label in ("Glassdoor", "Hiring Cafe", "Jobgether"):
+            tab = tk.Frame(notebook, bg=COLORS["input_bg"])
+            box = scrolledtext.ScrolledText(
+                tab, width=58, height=28, state="disabled", bg=COLORS["input_bg"], fg=COLORS["text"],
+                insertbackground=COLORS["text"], font=("Consolas", 9), bd=0,
+                highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=self.ACCENT,
+            )
+            box.pack(fill="both", expand=True)
+            notebook.add(tab, text=label)
+            self.log_boxes[label] = box
 
-        os.makedirs(LOGS_DIR, exist_ok=True)
-        self._log_fh = open(os.path.join(LOGS_DIR, "scrape_all.log"), "a", encoding="utf-8")
+        # Opened fresh per run in _run() - a new timestamped file per click of
+        # "Scrape All Jobs" instead of one file appended to forever - so None
+        # here just means no run has started yet.
+        self._log_fh = None
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -473,32 +678,90 @@ class ScraperPanel(tk.Frame):
 
     def stop(self):
         self._stop_requested = True
-        self._log("\n--- Stop requested: will halt after the current platform finishes ---\n")
+        self._log("\n--- Stop requested: will halt after the current platforms finish ---\n")
 
     def terminate_now(self):
-        """Hard stop used when the app window is closing — kill whatever
-        subprocess is currently running instead of waiting for it to finish."""
+        """Hard stop used when the app window is closing — kill whichever
+        platform subprocesses are currently running instead of waiting for
+        them to finish."""
         self._stop_requested = True
-        if self._current_proc is not None:
+        with self._procs_lock:
+            procs = list(self._current_procs)
+        for proc in procs:
             try:
-                self._current_proc.terminate()
+                proc.terminate()
             except Exception:
                 pass
 
     def clear_log(self):
-        self.log_box.configure(state="normal")
-        self.log_box.delete("1.0", "end")
-        self.log_box.configure(state="disabled")
+        def _do():
+            for box in self.log_boxes.values():
+                box.configure(state="normal")
+                box.delete("1.0", "end")
+                box.configure(state="disabled")
+        self.after(0, _do)
 
     def _log(self, text):
+        """Log an orchestration-level message (batch start/stop, keyword
+        header) - mirrored into every platform's tab, since it's not
+        specific to one platform, plus the combined scrape_all.log file."""
+        text = stamp_log_line(text)
+
         def _do():
-            self.log_box.configure(state="normal")
-            self.log_box.insert("end", text)
-            self.log_box.see("end")
-            self.log_box.configure(state="disabled")
+            for box in self.log_boxes.values():
+                box.configure(state="normal")
+                box.insert("end", text)
+                box.see("end")
+                box.configure(state="disabled")
         self.after(0, _do)
-        self._log_fh.write(text)
-        self._log_fh.flush()
+        # Multiple platform threads can log concurrently now, so the shared
+        # file write needs its own lock - without it, interleaved write()
+        # calls from different threads can garble lines in scrape_all.log.
+        with self._log_lock:
+            if self._log_fh is not None:
+                self._log_fh.write(text)
+                self._log_fh.flush()
+
+    def _close_run_logs(self, end_label, elapsed):
+        """Write each platform's own end-of-run marker, then close the
+        combined log file and every platform's log file. Clears
+        self._log_fh/_platform_log_fhs first (under the lock _log()/
+        _log_platform() also use) so any straggler log call from a
+        not-yet-wound-down daemon thread just no-ops instead of writing to a
+        closed handle."""
+        with self._log_lock:
+            fh = self._log_fh
+            self._log_fh = None
+            platform_fhs = self._platform_log_fhs
+            self._platform_log_fhs = {}
+        if fh is not None:
+            fh.close()
+        for label, pfh in platform_fhs.items():
+            try:
+                pfh.write(stamp_log_line(f"=== {label}: {end_label} (total time: {elapsed}) ===\n"))
+                pfh.flush()
+            except Exception:
+                pass
+            pfh.close()
+
+    def _log_platform(self, label, text):
+        """Log a line that belongs to one specific platform's subprocess -
+        goes only into that platform's own tab (not the others), plus the
+        combined scrape_all.log file so the full interleaved history is
+        still available there even though the on-screen view is now split."""
+        text = stamp_log_line(text)
+        box = self.log_boxes.get(label)
+        if box is not None:
+            def _do():
+                box.configure(state="normal")
+                box.insert("end", text)
+                box.see("end")
+                box.configure(state="disabled")
+            self.after(0, _do)
+        with self._log_lock:
+            if self._log_fh is not None:
+                self._log_fh.write(text)
+                self._log_fh.flush()
 
     def _set_status(self, text, color):
         self.after(0, lambda: self.status_label.configure(text=text, fg=color))
@@ -524,15 +787,31 @@ class ScraperPanel(tk.Frame):
     # platform/title instead of hanging indefinitely.
     STALL_TIMEOUT_SECONDS = 300
 
-    def _run_platform(self, label, cwd, cmd, log_path):
+    def _run_platform(self, label, cwd, cmd):
         """Run one platform's scraper as a subprocess, streaming its output
-        into the shared log box, this platform's own log file, and the
-        combined scrape_all.log — blocking until it finishes, Stop is hit, or
-        it stalls for STALL_TIMEOUT_SECONDS with no new output."""
-        self._log(f"\n$ {' '.join(cmd)}\n\n")
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
-        with open(log_path, "a", encoding="utf-8") as platform_fh:
-            platform_fh.write(f"$ {' '.join(cmd)}\n\n")
+        into that platform's own log tab/box, its own per-run log file (see
+        _run()), and the combined scrape_all log — blocking until it
+        finishes, Stop is hit, or it stalls for STALL_TIMEOUT_SECONDS with
+        no new output. Returns True only if the subprocess actually exited
+        cleanly (code 0, not stalled, not stopped) - callers use this to
+        decide whether a keyword truly finished or should stay eligible for
+        retry.
+
+        Wrapped in try/finally: this keyword's thread joins all 3 of its
+        platform threads before the batch can move on - if this raised
+        without cleaning up, that join() would hang forever."""
+        def _write_platform_log(text):
+            stamped = stamp_log_line(text)
+            with self._log_lock:
+                fh = self._platform_log_fhs.get(label)
+                if fh is not None:
+                    fh.write(stamped)
+                    fh.flush()
+
+        self._log_platform(label, f"\n$ {' '.join(cmd)}\n\n")
+        _write_platform_log(f"$ {' '.join(cmd)}\n\n")
+        proc = None
+        try:
             try:
                 proc = subprocess.Popen(
                     cmd, cwd=cwd, stdin=subprocess.DEVNULL,
@@ -541,10 +820,11 @@ class ScraperPanel(tk.Frame):
                 )
             except Exception as e:
                 msg = f"Failed to launch {label}: {e}\n"
-                self._log(msg)
-                platform_fh.write(msg)
-                return
-            self._current_proc = proc
+                self._log_platform(label, msg)
+                _write_platform_log(msg)
+                return False
+            with self._procs_lock:
+                self._current_procs.add(proc)
 
             line_queue = queue.Queue()
 
@@ -569,34 +849,58 @@ class ScraperPanel(tk.Frame):
                         f"{self.STALL_TIMEOUT_SECONDS // 60} minutes, "
                         f"terminating (likely stuck) ---\n"
                     )
-                    self._log(msg)
-                    platform_fh.write(msg)
+                    self._log_platform(label, msg)
+                    _write_platform_log(msg)
                     proc.terminate()
                     break
                 if line is None:
                     break
-                self._log(line)
-                platform_fh.write(line)
-                platform_fh.flush()
+                self._log_platform(label, line)
+                _write_platform_log(line)
 
             try:
                 code = proc.wait(timeout=15)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 code = proc.wait()
-            self._current_proc = None
             if not stalled:
                 msg = f"\n--- {label} finished (exit code {code}) ---\n"
-                self._log(msg)
-                platform_fh.write(msg)
+                self._log_platform(label, msg)
+                _write_platform_log(msg)
+            return code == 0 and not stalled and not self._stop_requested
+        finally:
+            if proc is not None:
+                with self._procs_lock:
+                    self._current_procs.discard(proc)
 
     def _run(self):
-        self._log(f"\n=== Scrape All: starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        run_start = datetime.now()
+        run_stamp = run_start.strftime('%Y-%m-%d_%H-%M-%S')
+        os.makedirs(LOGS_DIR, exist_ok=True)
+
+        # A fresh, separately-named log file per click of "Scrape All Jobs"
+        # (instead of one file appended to across every run), so each run's
+        # start/end timestamps are unambiguous - the filename itself records
+        # when this run started, and the file's own last line records when
+        # it ended (see the final _log() call below). Same per-run-file
+        # treatment for each platform, each in its own subfolder under
+        # LOGS_DIR so every platform's history is easy to find on its own.
+        self._log_fh = open(os.path.join(LOGS_DIR, f"scrape_all_{run_stamp}.log"), "a", encoding="utf-8")
+        for label, slug in self.PLATFORM_SLUGS.items():
+            platform_dir = os.path.join(LOGS_DIR, label)
+            os.makedirs(platform_dir, exist_ok=True)
+            fh = open(os.path.join(platform_dir, f"{slug}_{run_stamp}.log"), "a", encoding="utf-8")
+            fh.write(stamp_log_line(f"=== {label}: starting ===\n"))
+            fh.flush()
+            self._platform_log_fhs[label] = fh
+
+        self._log("\n=== Scrape All: starting ===\n")
         try:
             titles = self._fetch_titles()
         except Exception as e:
             self._log(f"Failed to read job titles from Sheet2: {e}\n")
             self._finish()
+            self._close_run_logs("stopped", format_duration(datetime.now() - run_start))
             return
 
         self._log(f"Loaded {len(titles)} job titles from Sheet2\n")
@@ -604,39 +908,45 @@ class ScraperPanel(tk.Frame):
         for idx, (title, location) in enumerate(titles, start=1):
             if self._stop_requested:
                 break
+
             self._log(f"\n--- [{idx}/{len(titles)}] {title} | {location} ---\n")
+            self._set_status(f"[{idx}/{len(titles)}] {title}", COLORS["running"])
 
-            self._set_status(f"[{idx}/{len(titles)}] {title} — Glassdoor", COLORS["running"])
-            inputs_path = os.path.join(GLASSD_DIR, "inputs.txt")
-            with open(inputs_path, "w", encoding="utf-8") as f:
-                f.write(f"{title}\n{location}\n")
-            self._run_platform(
-                "Glassdoor", GLASSD_DIR,
-                [sys.executable, "-u", "glassdoor_scraper_final.py"],
-                os.path.join(LOGS_DIR, "glassdoor.log"),
-            )
-            if self._stop_requested:
-                break
+            platform_specs = [
+                ("Glassdoor", GLASSD_DIR,
+                 [sys.executable, "-u", "glassdoor_scraper_final.py", title, location]),
+                ("Hiring Cafe", HIRINGCAFE_DIR,
+                 [sys.executable, "-u", "scraper.py", title, location]),
+                ("Jobgether", JOBGETHER_DIR,
+                 [sys.executable, "-u", "jobgether_scraper.py", title, "15"]),
+            ]
+            # Run all 3 platforms for this keyword at once - independent
+            # subprocesses with their own Chrome profiles, so nothing is
+            # shared between them. The next keyword doesn't start until all
+            # 3 of these finish.
+            results = {}
 
-            self._set_status(f"[{idx}/{len(titles)}] {title} — Hiring Cafe", COLORS["running"])
-            self._run_platform(
-                "Hiring Cafe", HIRINGCAFE_DIR,
-                [sys.executable, "-u", "scraper.py", title, location],
-                os.path.join(LOGS_DIR, "hiring_cafe.log"),
-            )
-            if self._stop_requested:
-                break
+            def _run_and_record(label, cwd, cmd):
+                results[label] = self._run_platform(label, cwd, cmd)
 
-            self._set_status(f"[{idx}/{len(titles)}] {title} — Jobgether", COLORS["running"])
-            self._run_platform(
-                "Jobgether", JOBGETHER_DIR,
-                [sys.executable, "-u", "jobgether_scraper.py", title, "15"],
-                os.path.join(LOGS_DIR, "jobgether.log"),
-            )
+            platform_threads = [
+                threading.Thread(target=_run_and_record, args=spec, daemon=True)
+                for spec in platform_specs
+            ]
+            for t in platform_threads:
+                t.start()
+            for t in platform_threads:
+                t.join()
+
+            failed = [label for label, *_ in platform_specs if not results.get(label)]
+            if not self._stop_requested and failed:
+                self._log(f"  {title} | {location}: {', '.join(failed)} did not finish cleanly\n")
 
         end_label = "stopped" if self._stop_requested else "finished"
-        self._log(f"\n=== Scrape All: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        elapsed = format_duration(datetime.now() - run_start)
+        self._log(f"\n=== Scrape All: {end_label} (total time: {elapsed}) ===\n")
         self._finish()
+        self._close_run_logs(end_label, elapsed)
 
 
 def main():
@@ -698,6 +1008,7 @@ def main():
     apply_panel = BotPanel(
         container, "Application Bot", "Start Applying",
         "main.py", JOBBOT_DIR,
+        log_dir=os.path.join(LOGS_DIR, "Application Bot"), log_prefix="apply",
     )
     apply_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
