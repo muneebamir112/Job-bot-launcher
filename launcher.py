@@ -365,6 +365,13 @@ class ResumeBotPanel(BotPanel):
             fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
         ).pack(anchor="w", pady=(0, 6))
 
+        profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
+        profile_frame.pack(fill="x", pady=5)
+        tk.Label(profile_frame, text="Number of Profiles:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+        self.num_profiles_var = tk.IntVar(value=1)
+        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10))
+        self.profile_spinbox.pack(side="left", padx=5)
+
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
 
@@ -407,14 +414,22 @@ class ResumeBotPanel(BotPanel):
         widgets may only be touched from the main thread — so hand the widget
         update back to it via after() (same approach as ScraperPanel._log).
         Writing to the log file is safe here since only one worker runs."""
-        def _do():
-            self.log_box.configure(state="normal")
-            self.log_box.insert("end", text)
-            self.log_box.see("end")
-            self.log_box.configure(state="disabled")
-        self.after(0, _do)
+        file_only = False
+        if "[FILE_ONLY]" in text:
+            file_only = True
+            text = text.replace("[FILE_ONLY]", "")
+            
+        if not file_only:
+            def _do():
+                self.log_box.configure(state="normal")
+                self.log_box.insert("end", text)
+                self.log_box.see("end")
+                self.log_box.configure(state="disabled")
+            self.after(0, _do)
+            
         if self._log_fh:
-            self._log_fh.write(text)
+            stamped_text = stamp_log_line(text)
+            self._log_fh.write(stamped_text)
             self._log_fh.flush()
 
     def _set_status(self, text):
@@ -465,7 +480,7 @@ class ResumeBotPanel(BotPanel):
             proc = subprocess.Popen(
                 cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1,
+                text=True, bufsize=1, encoding="utf-8", errors="replace"
             )
         except Exception as e:
             self._append_log(f"Failed to launch: {e}\n")
@@ -483,35 +498,37 @@ class ResumeBotPanel(BotPanel):
         try:
             sheet = self._connect_sheet()
             jobs = self._fetch_jobs(sheet)
+            headers = sheet.row_values(1)
         except Exception as e:
             self._append_log(f"Failed to read jobs from the Google Sheet: {e}\n")
             self._finish()
             return
 
+        num_profiles = self.num_profiles_var.get()
+        # Profiles start at column index 9 (0-based) which is column J (1-based is 10)
+        profile_names = headers[9:9+num_profiles]
+
         todo = []
         for company, link, row in jobs:
-            # Check the actual rendered PDF, not the intermediate
-            # data/<company>_ollama.json - that JSON can survive even after
-            # the PDF itself is deleted (or was never rendered due to a
-            # mid-run crash), which was wrongly skipping companies that have
-            # no resume file at all.
-            pdf_path = os.path.join(CVS_DIR, company, "Jimmy Tran.pdf")
-            if not os.path.exists(pdf_path):
-                todo.append((company, link, row))
+            for i, profile_name in enumerate(profile_names):
+                pdf_path = os.path.join(CVS_DIR, company, f"{profile_name}.pdf")
+                if not os.path.exists(pdf_path):
+                    col_index = 9 + i + 1  # 1-based column index
+                    todo.append((company, link, row, profile_name, col_index))
 
         self._append_log(
             f"Loaded {len(jobs)} job(s) with a link from the sheet — "
-            f"{len(jobs) - len(todo)} already have a resume, {len(todo)} to generate\n"
+            f"Queued {len(todo)} resume generation(s) across {num_profiles} profile(s)\n"
         )
 
         made = failed = 0
-        for idx, (company, link, row) in enumerate(todo, start=1):
+        for idx, (company, link, row, profile_name, col_index) in enumerate(todo, start=1):
             if self._stop_requested:
                 break
 
-            self._append_log(f"\n--- [{idx}/{len(todo)}] {company} ---\n")
+            self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
 
-            self._set_status(f"[{idx}/{len(todo)}] {company} — fetching JD")
+            self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
             self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
             code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
             if code is None:
@@ -553,18 +570,18 @@ class ResumeBotPanel(BotPanel):
                     f"anyway.\n"
                 )
 
-            self._set_status(f"[{idx}/{len(todo)}] {company} — generating resume")
-            self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\"\n\n")
-            code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company])
+            self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
+            self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\"\n\n")
+            code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company, profile_name])
             if code is None:
                 break
             if code != 0:
-                self._append_log(f"  Failed to generate a resume for {company}.\n")
+                self._append_log(f"  Failed to generate a resume for {company} ({profile_name}).\n")
                 failed += 1
             else:
                 made += 1
                 try:
-                    sheet.update_cell(row, self.RESUME_COLUMN, "Generated")
+                    sheet.update_cell(row, col_index, "Generated")
                 except Exception as e:
                     self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
 
