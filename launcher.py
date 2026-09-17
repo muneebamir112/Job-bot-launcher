@@ -172,6 +172,8 @@ class BotPanel(tk.Frame):
         self.process = None
         self.log_queue = queue.Queue()
         self._run_start = None
+        self.continuous_mode = False
+        self._stop_requested = False
 
         # Two ways to persist this panel's log output to disk, in addition
         # to the on-screen log box:
@@ -252,21 +254,30 @@ class BotPanel(tk.Frame):
             self._log_fh.write(display_text)
             self._log_fh.flush()
 
-    def start(self):
+    def start(self, continuous=False):
         if self.process is not None:
             return
         cmd = self.build_command()
         if cmd is None:
             return
-        self._run_start = datetime.now()
-        if self._log_dir and self._log_prefix:
-            os.makedirs(self._log_dir, exist_ok=True)
-            log_path = os.path.join(
-                self._log_dir,
-                f"{self._log_prefix}_{self._run_start.strftime('%Y-%m-%d_%H-%M-%S')}.log",
-            )
-            self._log_fh = open(log_path, "a", encoding="utf-8")
-            self._append_log(f"=== {self.title}: starting ===\n")
+        self.continuous_mode = continuous
+        self._stop_requested = False
+        
+        # Only open a new log file if we're not just respawning in continuous mode
+        if self._run_start is None or not self.continuous_mode:
+            self._run_start = datetime.now()
+            if self._log_dir and self._log_prefix:
+                os.makedirs(self._log_dir, exist_ok=True)
+                log_path = os.path.join(
+                    self._log_dir,
+                    f"{self._log_prefix}_{self._run_start.strftime('%Y-%m-%d_%H-%M-%S')}.log",
+                )
+                self._log_fh = open(log_path, "a", encoding="utf-8")
+                self._append_log(f"=== {self.title}: starting ===\n")
+        
+        self._spawn_process(cmd)
+
+    def _spawn_process(self, cmd):
         self._append_log(f"$ {' '.join(cmd)}\n\n")
         self.status_label.configure(text="Running...", fg=COLORS["running"])
         self.start_btn.configure(state="disabled")
@@ -312,16 +323,40 @@ class BotPanel(tk.Frame):
                 if line is None:
                     code = self.process.wait()
                     self._append_log(f"\n--- Finished (exit code {code}) ---\n")
-                    self._close_run_log(f"finished (exit code {code})")
-                    self.status_label.configure(text="Idle", fg=COLORS["idle"])
-                    self.start_btn.configure(state="normal")
-                    self.stop_btn.configure(state="disabled")
                     self.process = None
+                    if self.continuous_mode and not self._stop_requested:
+                        self.status_label.configure(text="Waiting...", fg=COLORS["idle"])
+                        self.after(30000, self._check_and_respawn)
+                    else:
+                        end_label = "stopped" if self._stop_requested else f"finished (exit code {code})"
+                        self._close_run_log(end_label)
+                        self._run_start = None
+                        self.status_label.configure(text="Idle", fg=COLORS["idle"])
+                        self.start_btn.configure(state="normal")
+                        self.stop_btn.configure(state="disabled")
                 else:
                     self._append_log(line)
         except queue.Empty:
             pass
         self.after(100, self._poll_queue)
+
+    def _check_and_respawn(self):
+        if not self._stop_requested and self.continuous_mode:
+            cmd = self.build_command()
+            if cmd is not None:
+                self._spawn_process(cmd)
+            else:
+                self._close_run_log("stopped")
+                self._run_start = None
+                self.status_label.configure(text="Idle", fg=COLORS["idle"])
+                self.start_btn.configure(state="normal")
+                self.stop_btn.configure(state="disabled")
+        elif self._run_start is not None:
+            self._close_run_log("stopped")
+            self._run_start = None
+            self.status_label.configure(text="Idle", fg=COLORS["idle"])
+            self.start_btn.configure(state="normal")
+            self.stop_btn.configure(state="disabled")
 
     def clear_log(self):
         self.log_box.configure(state="normal")
@@ -329,6 +364,7 @@ class BotPanel(tk.Frame):
         self.log_box.configure(state="disabled")
 
     def stop(self):
+        self._stop_requested = True
         if self.process is not None:
             self._append_log("\n--- Stopping... ---\n")
             self.process.terminate()
@@ -375,9 +411,10 @@ class ResumeBotPanel(BotPanel):
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
 
-    def start(self):
+    def start(self, continuous=False):
         if self.is_running():
             return
+        self.continuous_mode = continuous
         self._stop_requested = False
         self._append_log(f"\n=== Generate Resumes: starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         self.status_label.configure(text="Running...", fg=COLORS["running"])
@@ -443,8 +480,8 @@ class ResumeBotPanel(BotPanel):
         text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
         return text[:60] or "job"
 
-    # Column J - written "Generated" once a resume for that row's job exists.
-    RESUME_COLUMN = 10
+    # Column I - written "Generated" once a resume for that row's job exists.
+    RESUME_COLUMN = 9
 
     def _connect_sheet(self):
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -460,7 +497,7 @@ class ResumeBotPanel(BotPanel):
                 continue
             company, link = r[1].strip(), r[5].strip()
             if company and link:
-                jobs.append((company, link, i))
+                jobs.append((company, link, i, r))
         return jobs
 
     def _sleep_unless_stopped(self, seconds):
@@ -495,100 +532,384 @@ class ResumeBotPanel(BotPanel):
         return None if self._stop_requested else code
 
     def _run(self):
-        try:
-            sheet = self._connect_sheet()
-            jobs = self._fetch_jobs(sheet)
-            headers = sheet.row_values(1)
-        except Exception as e:
-            self._append_log(f"Failed to read jobs from the Google Sheet: {e}\n")
-            self._finish()
-            return
+        while not self._stop_requested:
+            try:
+                sheet = self._connect_sheet()
+                jobs = self._fetch_jobs(sheet)
+                headers = sheet.row_values(1)
+            except Exception as e:
+                self._append_log(f"Failed to read jobs from the Google Sheet: {e}\n")
+                if self.continuous_mode:
+                    if self._sleep_unless_stopped(30):
+                        break
+                    continue
+                else:
+                    self._finish()
+                    return
 
-        num_profiles = self.num_profiles_var.get()
-        # Profiles start at column index 9 (0-based) which is column J (1-based is 10)
-        profile_names = headers[9:9+num_profiles]
+            num_profiles = self.num_profiles_var.get()
+            # Profiles start at column index 8 (0-based) which is column I (1-based is 9)
+            profile_names = headers[8:8+num_profiles]
 
-        todo = []
-        for company, link, row in jobs:
-            for i, profile_name in enumerate(profile_names):
-                pdf_path = os.path.join(CVS_DIR, company, f"{profile_name}.pdf")
-                if not os.path.exists(pdf_path):
-                    col_index = 9 + i + 1  # 1-based column index
-                    todo.append((company, link, row, profile_name, col_index))
+            todo = []
+            for company, link, row, row_data in jobs:
+                for profile_name in profile_names:
+                    try:
+                        header_idx = headers.index(profile_name)
+                        col_index = header_idx + 1
+                        
+                        sheet_status = ""
+                        if header_idx < len(row_data):
+                            sheet_status = row_data[header_idx].strip().lower()
+                            
+                        # Check if the Google Sheet already says it's done
+                        if sheet_status in ("generated", "applied", "submitted", "human attention"):
+                            continue
+                            
+                    except ValueError:
+                        continue
+                        
+                    pdf_path = os.path.join(CVS_DIR, company, f"{profile_name}.pdf")
+                    if not os.path.exists(pdf_path):
+                        todo.append((company, link, row, profile_name, col_index))
 
-        self._append_log(
-            f"Loaded {len(jobs)} job(s) with a link from the sheet — "
-            f"Queued {len(todo)} resume generation(s) across {num_profiles} profile(s)\n"
-        )
+            if todo:
+                self._append_log(
+                    f"Loaded {len(jobs)} job(s) with a link from the sheet — "
+                    f"Queued {len(todo)} resume generation(s) across {num_profiles} profile(s)\n"
+                )
 
-        made = failed = 0
-        for idx, (company, link, row, profile_name, col_index) in enumerate(todo, start=1):
-            if self._stop_requested:
-                break
-
-            self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
-
-            self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
-            self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
-            code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
-            if code is None:
-                break
-            if code != 0:
-                # fetch_jd.py already retries transient DNS/connection blips
-                # internally; if it still came back non-zero, give it one
-                # more full attempt after a short pause before giving up -
-                # covers network outages that outlast its internal retries.
-                self._append_log(f"  Fetch failed for {company}, retrying once more in 15s...\n")
-                if self._sleep_unless_stopped(15):
+            made = failed = 0
+            for idx, (company, link, row, profile_name, col_index) in enumerate(todo, start=1):
+                if self._stop_requested:
                     break
-                self._append_log(f"$ fetch_jd.py {link} \"{company}\" (retry)\n\n")
+
+                self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
+
+                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
+                self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
                 code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
                 if code is None:
                     break
-            if code != 0:
-                self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
-                failed += 1
-                continue
+                if code != 0:
+                    self._append_log(f"  Fetch failed for {company}, retrying once more in 15s...\n")
+                    if self._sleep_unless_stopped(15):
+                        break
+                    self._append_log(f"$ fetch_jd.py {link} \"{company}\" (retry)\n\n")
+                    code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
+                    if code is None:
+                        break
+                if code != 0:
+                    self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
+                    failed += 1
+                    continue
 
-            # fetch_jd.py still exits 0 when a JavaScript-rendered page yields
-            # almost no text. Previously this was treated as a skip, but the
-            # user wants every row to get a resume attempt regardless - so
-            # this is now just a heads-up in the log, not a skip.
-            jd_filename = f"jd_{self._slugify(company)}.txt"
-            jd_path = os.path.join(self.cwd, jd_filename)
-            try:
-                with open(jd_path, encoding="utf-8") as f:
-                    jd_len = len(f.read().strip())
-            except OSError as e:
-                self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
-                failed += 1
-                continue
-            if jd_len < self.MIN_JD_CHARS:
-                self._append_log(
-                    f"  Job description is only {jd_len} characters (likely a "
-                    f"JavaScript-rendered page); generating a resume from it "
-                    f"anyway.\n"
-                )
-
-            self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
-            self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\"\n\n")
-            code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company, profile_name])
-            if code is None:
-                break
-            if code != 0:
-                self._append_log(f"  Failed to generate a resume for {company} ({profile_name}).\n")
-                failed += 1
-            else:
-                made += 1
+                jd_filename = f"jd_{self._slugify(company)}.txt"
+                jd_path = os.path.join(self.cwd, jd_filename)
                 try:
-                    sheet.update_cell(row, col_index, "Generated")
-                except Exception as e:
-                    self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
+                    with open(jd_path, encoding="utf-8") as f:
+                        jd_len = len(f.read().strip())
+                except OSError as e:
+                    self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
+                    failed += 1
+                    continue
+                if jd_len < self.MIN_JD_CHARS:
+                    self._append_log(
+                        f"  Job description is only {jd_len} characters. This usually "
+                        f"indicates an expired job link (404) or consent wall. "
+                        f"Skipping resume generation to prevent garbage data.\n"
+                    )
+                    try:
+                        if os.path.exists(jd_path):
+                            os.remove(jd_path)
+                    except OSError:
+                        pass
+                    failed += 1
+                    continue
 
-        self._append_log(f"\n{made} resume(s) generated, {failed} skipped/failed\n")
+                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
+                self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\"\n\n")
+                code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company, profile_name])
+                if code is None:
+                    break
+                if code != 0:
+                    self._append_log(f"  Failed to generate a resume for {company} ({profile_name}).\n")
+                    failed += 1
+                else:
+                    made += 1
+                    try:
+                        sheet.update_cell(row, col_index, "Generated")
+                    except Exception as e:
+                        self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
+                    
+                # Clean up the JD text file regardless of success or failure
+                try:
+                    if os.path.exists(jd_path):
+                        os.remove(jd_path)
+                except OSError as e:
+                    self._append_log(f"  Could not clean up {jd_filename}: {e}\n")
+
+            if todo:
+                self._append_log(f"\n{made} resume(s) generated, {failed} skipped/failed\n")
+            
+            if not self.continuous_mode or self._stop_requested:
+                break
+                
+            self._set_status("Waiting for new jobs...")
+            if self._sleep_unless_stopped(30):
+                break
+
         end_label = "stopped" if self._stop_requested else "finished"
         self._append_log(f"\n=== Generate Resumes: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
         self._finish()
+
+
+class CoverLetterBotPanel(BotPanel):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._stop_requested = False
+        self._thread = None
+        self._current_proc = None
+
+    def build_inputs(self, parent):
+        tk.Label(
+            parent,
+            text="Reads Company Name + Job Link from the Google Sheet\nand generates a tailored cover letter for each row not done yet.",
+            fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
+        ).pack(anchor="w", pady=(0, 6))
+
+        profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
+        profile_frame.pack(fill="x", pady=5)
+        tk.Label(profile_frame, text="Number of Profiles:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+        self.num_profiles_var = tk.IntVar(value=1)
+        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10))
+        self.profile_spinbox.pack(side="left", padx=5)
+
+    def is_running(self):
+        return self._thread is not None and self._thread.is_alive()
+
+    def start(self, continuous=False):
+        if self.is_running():
+            return
+        self.continuous_mode = continuous
+        self._stop_requested = False
+        self._append_log(f"\n=== Generate Cover Letters: starting at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        self.status_label.configure(text="Running...", fg=COLORS["running"])
+        self.start_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+
+    def stop(self):
+        self._stop_requested = True
+        self._append_log("\n--- Stopping... ---\n")
+        if self._current_proc is not None:
+            try:
+                self._current_proc.terminate()
+            except Exception:
+                pass
+
+    def terminate_now(self):
+        self.stop()
+
+    def _finish(self):
+        def _do():
+            self.status_label.configure(text="Idle", fg=COLORS["idle"])
+            self.start_btn.configure(state="normal")
+            self.stop_btn.configure(state="disabled")
+        self.after(0, _do)
+
+    def _append_log(self, text):
+        file_only = False
+        if "[FILE_ONLY]" in text:
+            file_only = True
+            text = text.replace("[FILE_ONLY]", "")
+            
+        if not file_only:
+            def _do():
+                self.log_box.configure(state="normal")
+                self.log_box.insert("end", text)
+                self.log_box.see("end")
+                self.log_box.configure(state="disabled")
+            self.after(0, _do)
+            
+        if self._log_fh:
+            stamped_text = stamp_log_line(text)
+            self._log_fh.write(stamped_text)
+            self._log_fh.flush()
+
+    def _set_status(self, text):
+        self.after(0, lambda: self.status_label.configure(text=text, fg=COLORS["running"]))
+
+    @staticmethod
+    def _slugify(text):
+        text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
+        return text[:60] or "job"
+
+    # We will write 'Cover Letter Generated' instead of 'Generated' maybe?
+    # Actually, the user asked if checking if PDF exists is enough, they didn't answer about the sheet column.
+    # So we'll just check if PDF exists. We won't write to the sheet.
+
+    def _connect_sheet(self):
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+        client = gspread.authorize(creds)
+        return client.open_by_key(GOOGLE_SHEET_ID).sheet1
+
+    def _fetch_jobs(self, ws):
+        rows = ws.get_all_values()[1:]  # skip header row
+        jobs = []
+        for i, r in enumerate(rows, start=2):  # row 2 is the first data row
+            if len(r) < 6:
+                continue
+            company, link = r[1].strip(), r[5].strip()
+            if company and link:
+                jobs.append((company, link, i, r))
+        return jobs
+
+    def _sleep_unless_stopped(self, seconds):
+        for _ in range(int(seconds * 10)):
+            if self._stop_requested:
+                return True
+            time.sleep(0.1)
+        return False
+
+    def _run_subprocess(self, cmd):
+        try:
+            self._current_proc = subprocess.Popen(
+                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                creationflags=subprocess.CREATE_NO_WINDOW
+            )
+            for line in iter(self._current_proc.stdout.readline, ""):
+                if self._stop_requested:
+                    self._current_proc.terminate()
+                    break
+                self._append_log(line)
+            
+            self._current_proc.stdout.close()
+            self._current_proc.wait()
+            ret = self._current_proc.returncode
+            self._current_proc = None
+            return ret
+        except Exception as e:
+            self._append_log(f"  Error launching subprocess: {e}\n")
+            return -1
+
+    def _run(self):
+        self._current_proc = None
+        while True:
+            if self._stop_requested:
+                break
+
+            self._set_status("Connecting to Google Sheets...")
+            try:
+                sheet = self._connect_sheet()
+                headers = sheet.get_all_values()[0]
+                jobs = self._fetch_jobs(sheet)
+            except Exception as e:
+                self._append_log(f"Failed to fetch job links: {e}\nRetrying in 15s...\n")
+                if self._sleep_unless_stopped(15):
+                    break
+                continue
+
+            num_profiles = self.num_profiles_var.get()
+            profile_names = headers[8:8+num_profiles]
+
+            todo = []
+            COVERLETTER_DIR = r"C:\Users\webNcodes\Desktop\coverletter"
+            for company, link, row, row_data in jobs:
+                for profile_name in profile_names:
+                    # Don't check the Google sheet for cover letter status, just check the file!
+                    pdf_path = os.path.join(COVERLETTER_DIR, company, f"Cover Letter - {profile_name}.pdf")
+                    if not os.path.exists(pdf_path):
+                        todo.append((company, link, row, profile_name))
+
+            if todo:
+                self._append_log(
+                    f"Loaded {len(jobs)} job(s) with a link from the sheet — "
+                    f"Queued {len(todo)} cover letter generation(s) across {num_profiles} profile(s)\n"
+                )
+
+            made = failed = 0
+            for idx, (company, link, row, profile_name) in enumerate(todo, start=1):
+                if self._stop_requested:
+                    break
+
+                self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
+
+                jd_filename = f"jd_{self._slugify(company)}.txt"
+                jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
+
+                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
+                self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
+                
+                # Run fetch_jd from ResumeBot dir
+                cwd_resumebot = RESUMEBOT_DIR
+                self._current_proc = subprocess.Popen(
+                    [sys.executable, "-u", "fetch_jd.py", link, company],
+                    cwd=cwd_resumebot,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                for line in iter(self._current_proc.stdout.readline, ""):
+                    if self._stop_requested:
+                        self._current_proc.terminate()
+                        break
+                    self._append_log(line)
+                self._current_proc.wait()
+                code = self._current_proc.returncode
+
+                if code != 0:
+                    self._append_log(f"  Fetch failed for {company}, skipping cover letter generation.\n")
+                    failed += 1
+                    continue
+
+                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
+                self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\"\n\n")
+                
+                # Run batch_generate from cover_letter_bot dir
+                cwd_clbot = r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot"
+                self._current_proc = subprocess.Popen(
+                    [sys.executable, "-u", "batch_generate.py", jd_path, company, profile_name],
+                    cwd=cwd_clbot,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                    creationflags=subprocess.CREATE_NO_WINDOW
+                )
+                for line in iter(self._current_proc.stdout.readline, ""):
+                    if self._stop_requested:
+                        self._current_proc.terminate()
+                        break
+                    self._append_log(line)
+                self._current_proc.wait()
+                code = self._current_proc.returncode
+
+                if code != 0:
+                    self._append_log(f"  Failed to generate a cover letter for {company} ({profile_name}).\n")
+                    failed += 1
+                else:
+                    made += 1
+                    
+                # Clean up the JD text file regardless of success or failure
+                try:
+                    if os.path.exists(jd_path):
+                        os.remove(jd_path)
+                except OSError as e:
+                    self._append_log(f"  Could not clean up {jd_filename}: {e}\n")
+
+            if todo:
+                self._append_log(f"\n{made} cover letter(s) generated, {failed} skipped/failed\n")
+            
+            if not self.continuous_mode or self._stop_requested:
+                break
+                
+            self._set_status("Waiting for new jobs...")
+            if self._sleep_unless_stopped(30):
+                break
+
+        end_label = "stopped" if self._stop_requested else "finished"
+        self._append_log(f"\n=== Generate Cover Letters: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+        self._finish()
+
 
 
 class ScraperPanel(tk.Frame):
@@ -979,14 +1300,55 @@ def main():
 
     header = tk.Frame(root, bg=COLORS["bg"])
     header.pack(fill="x", padx=14, pady=(12, 4))
+    
+    title_frame = tk.Frame(header, bg=COLORS["bg"])
+    title_frame.pack(side="left")
     tk.Label(
-        header, text="Job Bot Launcher", font=("Segoe UI", 16, "bold"),
+        title_frame, text="Job Bot Launcher", font=("Segoe UI", 16, "bold"),
         fg=COLORS["text"], bg=COLORS["bg"],
     ).pack(side="left")
     tk.Label(
-        header, text="  scrape  →  tailor  →  apply", font=("Segoe UI", 10),
+        title_frame, text="  scrape  →  tailor  →  apply", font=("Segoe UI", 10),
         fg=COLORS["muted"], bg=COLORS["bg"],
     ).pack(side="left", pady=(4, 0))
+
+    # Add Auto-Pilot controls
+    autopilot_frame = tk.Frame(header, bg=COLORS["bg"])
+    autopilot_frame.pack(side="right", padx=10)
+    
+    tk.Label(
+        autopilot_frame, text="Auto-Pilot Pipeline:", font=("Segoe UI", 10, "bold"),
+        fg=COLORS["text"], bg=COLORS["bg"],
+    ).pack(side="left", padx=5)
+
+    def _start_autopilot():
+        autopilot_start_btn.configure(state="disabled")
+        autopilot_stop_btn.configure(state="normal")
+        if not scraper_panel.is_running():
+            scraper_panel.start()
+        resume_panel.start(continuous=True)
+        cover_letter_panel.start(continuous=True)
+        apply_panel.start(continuous=True)
+
+    def _stop_autopilot():
+        autopilot_start_btn.configure(state="normal")
+        autopilot_stop_btn.configure(state="disabled")
+        resume_panel.stop()
+        cover_letter_panel.stop()
+        apply_panel.stop()
+        # Note: Scraper panel runs standard once-through Sheet2 then exits natively.
+        # But we could stop it if desired.
+        if scraper_panel.is_running():
+            scraper_panel.stop()
+
+    autopilot_start_btn = ttk.Button(
+        autopilot_frame, text="▶ Start Auto-Pilot", width=18, command=_start_autopilot, style="Accent4.TButton",
+    )
+    autopilot_start_btn.pack(side="left", padx=4)
+    autopilot_stop_btn = ttk.Button(
+        autopilot_frame, text="⏹ Stop Auto-Pilot", width=16, command=_stop_autopilot, state="disabled", style="Secondary.TButton",
+    )
+    autopilot_stop_btn.pack(side="left", padx=4)
 
     # 3 panels side by side can still be wider than a small screen, so the
     # panel row lives in a horizontally scrollable canvas instead of a plain
@@ -1022,7 +1384,38 @@ def main():
     )
     resume_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
-    apply_panel = BotPanel(
+    cover_letter_panel = CoverLetterBotPanel(
+        container, "Cover Letter Bot", "Generate Cover Letters",
+        "batch_generate.py", r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot",
+        log_file=os.path.join(LOGS_DIR, "cover_letter_bot.log"),
+    )
+    cover_letter_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+
+    class JobBotPanel(BotPanel):
+        def build_inputs(self, parent):
+            tk.Label(
+                parent,
+                text="Reads pending job links from the Google Sheet\nand applies using the generated profiles.",
+                fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
+            ).pack(anchor="w", pady=(0, 6))
+
+            profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
+            profile_frame.pack(fill="x", pady=5)
+            tk.Label(profile_frame, text="Number of Profiles (0=All):", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+            self.num_profiles_var = tk.IntVar(value=0)
+            self.profile_spinbox = tk.Spinbox(profile_frame, from_=0, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10))
+            self.profile_spinbox.pack(side="left", padx=5)
+
+        def build_command(self):
+            cmd = super().build_command()
+            if not cmd:
+                return None
+            num = self.num_profiles_var.get()
+            if num > 0:
+                cmd.extend(["--num-profiles", str(num)])
+            return cmd
+
+    apply_panel = JobBotPanel(
         container, "Application Bot", "Start Applying",
         "main.py", JOBBOT_DIR,
         log_dir=os.path.join(LOGS_DIR, "Application Bot"), log_prefix="apply",
@@ -1032,7 +1425,9 @@ def main():
     def on_close():
         scraper_panel.terminate_now()
         resume_panel.terminate_now()
-        if apply_panel.is_running():
+        cover_letter_panel.terminate_now()
+        apply_panel.stop()
+        if apply_panel.process is not None:
             apply_panel.process.terminate()
         root.destroy()
 
