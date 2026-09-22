@@ -1,3 +1,5 @@
 __pycache__/
 *.pyc
 logs/
+service_account.json
+.env

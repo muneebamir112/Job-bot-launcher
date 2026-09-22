@@ -54,7 +54,12 @@ CVS_DIR = r"C:\Users\webNcodes\Desktop\CVs"
 # holds the job-title/location queue that "Scrape All Platforms" reads from.
 GOOGLE_SHEET_ID = "1FsPR9t-BB1GZ6kWfANnrDfq4p9XobDuA1tVB4D2sJDg"
 SHEET2_NAME = "Sheet2"
-SERVICE_ACCOUNT_FILE = os.path.join(GLASSD_DIR, "service_account.json")
+SERVICE_ACCOUNT_CANDIDATES = [
+    os.path.join(JOBBOT_DIR, "service_account.json"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "service_account.json"),
+    os.path.join(GLASSD_DIR, "service_account.json"),
+]
+SERVICE_ACCOUNT_FILE = next((p for p in SERVICE_ACCOUNT_CANDIDATES if os.path.exists(p)), SERVICE_ACCOUNT_CANDIDATES[0])
 
 # Dark theme palette. Each BotPanel is assigned one accent color (in creation
 # order) purely for visual variety between panels — no behavioral effect.
@@ -403,10 +408,15 @@ class ResumeBotPanel(BotPanel):
 
         profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
         profile_frame.pack(fill="x", pady=5)
-        tk.Label(profile_frame, text="Number of Profiles:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+        tk.Label(profile_frame, text="Profile:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+        self.selected_profile_var = tk.StringVar(value="All Profiles")
+        self.profile_combo = ttk.Combobox(profile_frame, textvariable=self.selected_profile_var, values=["All Profiles", "Brian Moore", "Jimmy Tran", "Sameul Walker"], state="readonly", width=14, font=("Segoe UI", 9))
+        self.profile_combo.pack(side="left", padx=5)
+
+        tk.Label(profile_frame, text="Or Count:", font=("Segoe UI", 9), fg=COLORS["muted"], bg=COLORS["panel_bg"]).pack(side="left", padx=(10, 2))
         self.num_profiles_var = tk.IntVar(value=1)
-        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10))
-        self.profile_spinbox.pack(side="left", padx=5)
+        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=3, font=("Segoe UI", 9))
+        self.profile_spinbox.pack(side="left", padx=2)
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -547,9 +557,15 @@ class ResumeBotPanel(BotPanel):
                     self._finish()
                     return
 
-            num_profiles = self.num_profiles_var.get()
-            # Profiles start at column index 8 (0-based) which is column I (1-based is 9)
-            profile_names = headers[8:8+num_profiles]
+            selected_prof = getattr(self, "selected_profile_var", None)
+            chosen = selected_prof.get().strip() if selected_prof else "All Profiles"
+            if chosen and chosen != "All Profiles":
+                profile_names = [chosen]
+                num_profiles = 1
+            else:
+                num_profiles = self.num_profiles_var.get()
+                # Profiles start at column index 8 (0-based) which is column I (1-based is 9)
+                profile_names = headers[8:8+num_profiles]
 
             todo = []
             for company, link, row, row_data in jobs:
@@ -680,10 +696,15 @@ class CoverLetterBotPanel(BotPanel):
 
         profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
         profile_frame.pack(fill="x", pady=5)
-        tk.Label(profile_frame, text="Number of Profiles:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+        tk.Label(profile_frame, text="Profile:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
+        self.selected_profile_var = tk.StringVar(value="All Profiles")
+        self.profile_combo = ttk.Combobox(profile_frame, textvariable=self.selected_profile_var, values=["All Profiles", "Brian Moore", "Jimmy Tran", "Sameul Walker"], state="readonly", width=14, font=("Segoe UI", 9))
+        self.profile_combo.pack(side="left", padx=5)
+
+        tk.Label(profile_frame, text="Or Count:", font=("Segoe UI", 9), fg=COLORS["muted"], bg=COLORS["panel_bg"]).pack(side="left", padx=(10, 2))
         self.num_profiles_var = tk.IntVar(value=1)
-        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10))
-        self.profile_spinbox.pack(side="left", padx=5)
+        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=3, font=("Segoe UI", 9))
+        self.profile_spinbox.pack(side="left", padx=2)
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -812,8 +833,14 @@ class CoverLetterBotPanel(BotPanel):
                     break
                 continue
 
-            num_profiles = self.num_profiles_var.get()
-            profile_names = headers[8:8+num_profiles]
+            selected_prof = getattr(self, "selected_profile_var", None)
+            chosen = selected_prof.get().strip() if selected_prof else "All Profiles"
+            if chosen and chosen != "All Profiles":
+                profile_names = [chosen]
+                num_profiles = 1
+            else:
+                num_profiles = self.num_profiles_var.get()
+                profile_names = headers[8:8+num_profiles]
 
             todo = []
             COVERLETTER_DIR = r"C:\Users\webNcodes\Desktop\coverletter"
