@@ -506,6 +506,21 @@ class ResumeBotPanel(BotPanel):
             if len(r) < 6:
                 continue
             company, link = r[1].strip(), r[5].strip()
+            
+            if not company and link:
+                try:
+                    from urllib.parse import urlparse
+                    import re
+                    host = urlparse(link).netloc
+                    host = re.sub(r"^www\.", "", host)
+                    parts = host.split(".")
+                    if len(parts) >= 2:
+                        company = parts[-2].capitalize()
+                    else:
+                        company = host.capitalize()
+                except Exception:
+                    company = "Unknown"
+                    
             if company and link:
                 jobs.append((company, link, i, r))
         return jobs
@@ -523,6 +538,7 @@ class ResumeBotPanel(BotPanel):
     def _run_subprocess(self, cmd):
         """Run one subprocess to completion, streaming its output into the
         log box, and return its exit code (or None if Stop was hit)."""
+        self._last_output = ""
         try:
             proc = subprocess.Popen(
                 cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
@@ -533,10 +549,13 @@ class ResumeBotPanel(BotPanel):
             self._append_log(f"Failed to launch: {e}\n")
             return 1
         self._current_proc = proc
+        out_lines = []
         for line in proc.stdout:
             self._append_log(line)
+            out_lines.append(line)
             if self._stop_requested:
                 proc.terminate()
+        self._last_output = "".join(out_lines)
         code = proc.wait()
         self._current_proc = None
         return None if self._stop_requested else code
@@ -617,6 +636,19 @@ class ResumeBotPanel(BotPanel):
                         break
                 if code != 0:
                     self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
+                    error_msg = "Fetch Failed"
+                    if hasattr(self, '_last_output'):
+                        out = self._last_output.lower()
+                        if "403" in out or "forbidden" in out:
+                            error_msg = "Blocked (403)"
+                        elif "404" in out or "410" in out or "expired" in out:
+                            error_msg = "Expired (404)"
+                        elif "invalidschema" in out or "chrome-error" in out:
+                            error_msg = "Invalid/Broken Link"
+                    try:
+                        sheet.update_cell(row, col_index, error_msg)
+                    except Exception:
+                        pass
                     failed += 1
                     continue
 
@@ -627,6 +659,10 @@ class ResumeBotPanel(BotPanel):
                         jd_len = len(f.read().strip())
                 except OSError as e:
                     self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
+                    try:
+                        sheet.update_cell(row, col_index, "Failed to read JD")
+                    except Exception:
+                        pass
                     failed += 1
                     continue
                 if jd_len < self.MIN_JD_CHARS:
@@ -635,6 +671,10 @@ class ResumeBotPanel(BotPanel):
                         f"indicates an expired job link (404) or consent wall. "
                         f"Skipping resume generation to prevent garbage data.\n"
                     )
+                    try:
+                        sheet.update_cell(row, col_index, "Invalid JD (Too short)")
+                    except Exception:
+                        pass
                     try:
                         if os.path.exists(jd_path):
                             os.remove(jd_path)
@@ -650,6 +690,10 @@ class ResumeBotPanel(BotPanel):
                     break
                 if code != 0:
                     self._append_log(f"  Failed to generate a resume for {company} ({profile_name}).\n")
+                    try:
+                        sheet.update_cell(row, col_index, "Generation Failed")
+                    except Exception:
+                        pass
                     failed += 1
                 else:
                     made += 1
