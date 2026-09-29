@@ -50,9 +50,12 @@ LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
 # already exists for a company (see ResumeBotPanel._run).
 CVS_DIR = r"C:\Users\webNcodes\Desktop\CVs"
 
+from dotenv import load_dotenv
+load_dotenv(os.path.join(JOBBOT_DIR, ".env"))
+
 # Same spreadsheet the scrapers already sync job links into (Sheet1). Sheet2
 # holds the job-title/location queue that "Scrape All Platforms" reads from.
-GOOGLE_SHEET_ID = "1FsPR9t-BB1GZ6kWfANnrDfq4p9XobDuA1tVB4D2sJDg"
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1Kva2y5-54LXBWMTzNk_xp524ZE7N-CWiqL3VGATUZVM")
 SHEET2_NAME = "Sheet2"
 SERVICE_ACCOUNT_CANDIDATES = [
     os.path.join(JOBBOT_DIR, "service_account.json"),
@@ -1477,6 +1480,11 @@ def main():
             self.profile_spinbox = tk.Spinbox(profile_frame, from_=0, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10))
             self.profile_spinbox.pack(side="left", padx=5)
 
+            req_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
+            req_frame.pack(fill="x", pady=5)
+            self.fill_required_only_var = tk.BooleanVar(value=False)
+            tk.Checkbutton(req_frame, text="Only fill compulsory fields (ignore optional)", variable=self.fill_required_only_var, fg=COLORS["text"], bg=COLORS["panel_bg"], selectcolor=COLORS["input_bg"], activebackground=COLORS["panel_bg"], activeforeground=COLORS["text"], font=("Segoe UI", 10)).pack(side="left", padx=5)
+
         def build_command(self):
             cmd = super().build_command()
             if not cmd:
@@ -1484,6 +1492,8 @@ def main():
             num = self.num_profiles_var.get()
             if num > 0:
                 cmd.extend(["--num-profiles", str(num)])
+            if self.fill_required_only_var.get():
+                cmd.extend(["--fill-required-only"])
             return cmd
 
     apply_panel = JobBotPanel(
