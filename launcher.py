@@ -68,7 +68,7 @@ else:
 # Must match CVS_DIR in resume-bot/ollama_generate.py - that's where the
 # actual rendered resumes end up; used here only to check whether one
 # already exists for a company (see ResumeBotPanel._run).
-CVS_DIR = os.path.join(BASE_DIR, "CVs")
+CVS_DIR = os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(CURRENT_DIR, ".env"))
@@ -400,7 +400,7 @@ class BotPanel(tk.Frame):
             import gspread
             creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
             client = gspread.authorize(creds)
-            ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET2_NAME)
+            ws = client.open_by_key(os.getenv("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)).worksheet(SHEET2_NAME)
             rows = ws.get_all_values()
         except Exception as e:
             from tkinter import messagebox
@@ -1426,7 +1426,7 @@ class ScraperPanel(tk.Frame):
             import gspread
             creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
             client = gspread.authorize(creds)
-            ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET2_NAME)
+            ws = client.open_by_key(os.getenv("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)).worksheet(SHEET2_NAME)
             rows = ws.get_all_values()
         except Exception as e:
             from tkinter import messagebox
@@ -1565,7 +1565,7 @@ class ScraperPanel(tk.Frame):
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
         client = gspread.authorize(creds)
-        ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET2_NAME)
+        ws = client.open_by_key(os.getenv("GOOGLE_SHEET_ID", GOOGLE_SHEET_ID)).worksheet(SHEET2_NAME)
         rows = ws.get_all_values()[1:]  # skip header row
         return [(r[0].strip(), r[1].strip()) for r in rows if len(r) >= 2 and r[0].strip()]
 
@@ -1890,6 +1890,28 @@ def check_prerequisites(root):
     f2.columnconfigure(0, weight=1)
     sheet_entry.insert(0, sheet_id)
     
+    # 3. Resume Save Folder
+    f3 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
+    f3.pack(fill="x", pady=10, padx=5)
+    
+    tk.Label(f3, text="3. Output Folder for Resumes", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f3, text="Where should your customized PDF resumes be saved?", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
+    
+    resume_path_var = tk.StringVar(value=os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs")))
+    
+    path_entry = tk.Entry(f3, textvariable=resume_path_var, width=50, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
+    path_entry.grid(row=2, column=0, sticky="ew", padx=(20, 5), pady=5, ipady=5)
+    
+    from tkinter import filedialog
+    def browse_path():
+        folder = filedialog.askdirectory(title="Select Output Folder")
+        if folder:
+            resume_path_var.set(folder)
+            
+    tk.Button(f3, text="Browse...", command=browse_path, font=("Segoe UI", 10, "bold"), bg="#555", fg="white", relief="flat", cursor="hand2").grid(row=2, column=1, padx=(0, 20), pady=5, sticky="ew")
+    f3.columnconfigure(0, weight=1)
+
+    
     tk.Label(f2, text="ℹ️ Look at your sheet URL: docs.google.com/spreadsheets/d/[THIS_IS_THE_ID]/edit", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(5, 5))
     tk.Label(f2, text="⚠️ CRITICAL: You must share your sheet with the Service Account email as an Editor!", bg=panel_bg, fg="#FFB900", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 20))
     
@@ -1939,8 +1961,9 @@ def check_prerequisites(root):
         c += "OLLAMA_HOST=" + host_entry.get().strip() + "\n\n"
         c += "# Google Sheet Configuration\n"
         c += "GOOGLE_SHEET_ID=" + sheet_entry.get().strip() + "\n"
+        c += "RESUMES_SAVE_PATH=" + resume_path_var.get().strip() + "\n"
         c += "SERVICE_ACCOUNT_JSON=service_account.json\n"
-        c += "WORKSHEET_NAME=Sheet1\n\n"
+        
         c += "# Automation Behavior\n"
         c += "AUTO_SUBMIT=True\n"
         c += "HEADLESS=False\n"
@@ -2036,6 +2059,8 @@ def check_prerequisites(root):
     footer_frame.pack(side="bottom", fill="x", pady=20)
     
     def on_done():
+        from dotenv import load_dotenv
+        load_dotenv(env_path, override=True)
         setup_win.destroy()
         
     btn_done = tk.Button(footer_frame, text="✔ I'm Done, Launch App", command=on_done, font=("Segoe UI", 14, "bold"), bg="#555555", fg="white", cursor="hand2", relief="flat", padx=30, pady=12, state="disabled")
@@ -2071,7 +2096,7 @@ def run_auth_check(root):
                     
     def verify_email(e):
         try:
-            url = 'http://127.0.0.1:8000/api/verify-email'
+            url = 'https://job-bot.webncodes.site/api/verify-email'
             data = urllib.parse.urlencode({'email': e}).encode('utf-8')
             req = urllib.request.Request(url, data=data)
             with urllib.request.urlopen(req) as response:
@@ -2149,6 +2174,28 @@ def run_auth_check(root):
             email = result_email[0] # keep it for next loop
 
 
+
+def sync_configs():
+    import shutil
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    parent_dir = os.path.dirname(current_dir)
+    env_src = os.path.join(current_dir, ".env")
+    sa_src = os.path.join(current_dir, "service_account.json")
+    
+    targets = [
+        os.path.join(parent_dir, "scraper", "GlassD"),
+        os.path.join(parent_dir, "scraper", "Hiring_cafe"),
+        os.path.join(parent_dir, "scraper", "Jobgether"),
+        os.path.join(parent_dir, "resume-bot")
+    ]
+    
+    for t in targets:
+        if os.path.exists(t):
+            if os.path.exists(env_src):
+                shutil.copy2(env_src, os.path.join(t, ".env"))
+            if os.path.exists(sa_src):
+                shutil.copy2(sa_src, os.path.join(t, "service_account.json"))
+
 def main():
     root = tk.Tk()
     root.withdraw() # Hide window during check
@@ -2156,6 +2203,8 @@ def main():
     if not run_auth_check(root):
         root.destroy()
         sys.exit(1)
+        
+    sync_configs()
 
     if not check_prerequisites(root):
         root.destroy()
