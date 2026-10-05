@@ -26,6 +26,12 @@ same time. None of the bots' own source code is modified by this launcher.
 """
 
 import os
+
+import sys
+if getattr(sys, 'frozen', False):
+    CURRENT_DIR = os.path.dirname(sys.executable)
+else:
+    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 import queue
 import re
 import subprocess
@@ -33,33 +39,47 @@ import sys
 import threading
 import time
 import tkinter as tk
+from tkinter import filedialog, messagebox
+
 from datetime import datetime
 from tkinter import scrolledtext, ttk
 
 import gspread
 from google.oauth2.service_account import Credentials
 
-GLASSD_DIR = r"C:\Users\webNcodes\Desktop\webncodes\scraper\GlassD"
-HIRINGCAFE_DIR = r"C:\Users\webNcodes\Desktop\webncodes\scraper\Hiring_cafe"
-JOBGETHER_DIR = r"C:\Users\webNcodes\Desktop\webncodes\scraper\Jobgether"
-JOBBOT_DIR = r"C:\Users\webNcodes\Desktop\webncodes\Job-Bot"
-RESUMEBOT_DIR = r"C:\Users\webNcodes\Desktop\webncodes\resume-bot"
-LOGS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs")
+import os
+if getattr(sys, 'frozen', False):
+    # If compiled with PyInstaller, sys.executable is the .exe file path
+    # The .exe is inside JobBot_Pro_Release/Job-bot-launcher/launcher.exe
+    # So we go up one level to get BASE_DIR
+    _current_dir = os.path.dirname(sys.executable)
+    BASE_DIR = os.path.dirname(_current_dir)
+else:
+    BASE_DIR = os.path.dirname(CURRENT_DIR)
+GLASSD_DIR = os.path.join(BASE_DIR, "scraper", "GlassD")
+HIRINGCAFE_DIR = os.path.join(BASE_DIR, "scraper", "Hiring_cafe")
+JOBGETHER_DIR = os.path.join(BASE_DIR, "scraper", "Jobgether")
+JOBBOT_DIR = os.path.join(BASE_DIR, "Job-Bot")
+RESUMEBOT_DIR = os.path.join(BASE_DIR, "resume-bot")
+if getattr(sys, 'frozen', False):
+    LOGS_DIR = os.path.join(os.path.dirname(sys.executable), "logs")
+else:
+    LOGS_DIR = os.path.join(CURRENT_DIR, "logs")
 # Must match CVS_DIR in resume-bot/ollama_generate.py - that's where the
 # actual rendered resumes end up; used here only to check whether one
 # already exists for a company (see ResumeBotPanel._run).
-CVS_DIR = r"C:\Users\webNcodes\Desktop\CVs"
+CVS_DIR = os.path.join(BASE_DIR, "CVs")
 
 from dotenv import load_dotenv
-load_dotenv(os.path.join(JOBBOT_DIR, ".env"))
+load_dotenv(os.path.join(CURRENT_DIR, ".env"))
 
 # Same spreadsheet the scrapers already sync job links into (Sheet1). Sheet2
 # holds the job-title/location queue that "Scrape All Platforms" reads from.
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1Kva2y5-54LXBWMTzNk_xp524ZE7N-CWiqL3VGATUZVM")
 SHEET2_NAME = "Sheet2"
 SERVICE_ACCOUNT_CANDIDATES = [
-    os.path.join(JOBBOT_DIR, "service_account.json"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "service_account.json"),
+    os.path.join(CURRENT_DIR, "service_account.json"),
+    os.path.join(CURRENT_DIR, "service_account.json"),
     os.path.join(GLASSD_DIR, "service_account.json"),
 ]
 SERVICE_ACCOUNT_FILE = next((p for p in SERVICE_ACCOUNT_CANDIDATES if os.path.exists(p)), SERVICE_ACCOUNT_CANDIDATES[0])
@@ -226,6 +246,11 @@ class BotPanel(tk.Frame):
             btn_frame, text="Clear", width=8, command=self.clear_log, style="Secondary.TButton",
         )
         self.clear_btn.pack(side="left", padx=4)
+        
+        self.edit_kw_btn = ttk.Button(
+            btn_frame, text="Edit Keywords", width=14, command=self.edit_keywords, style="Secondary.TButton",
+        )
+        self.edit_kw_btn.pack(side="left", padx=4)
 
         self.status_label = tk.Label(self, text="Idle", fg=COLORS["idle"], bg=COLORS["panel_bg"], font=("Segoe UI", 9))
         self.status_label.pack(pady=(0, 6))
@@ -299,6 +324,8 @@ class BotPanel(tk.Frame):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
+                creationflags=0x08000000,
+                env=os.environ.copy()
             )
         except Exception as e:
             self._append_log(f"Failed to launch: {e}\n")
@@ -366,6 +393,68 @@ class BotPanel(tk.Frame):
             self.start_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
 
+    def edit_keywords(self):
+        try:
+            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            from google.oauth2.service_account import Credentials
+            import gspread
+            creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+            client = gspread.authorize(creds)
+            ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET2_NAME)
+            rows = ws.get_all_values()
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to load keywords from sheet:\n{e}")
+            return
+            
+        top = tk.Toplevel(self)
+        top.title("Edit Scraper Keywords")
+        top.geometry("500x400")
+        top.configure(bg=COLORS["panel_bg"])
+        top.grab_set()
+        
+        tk.Label(top, text="Format: Job Title | Location\n(One per line)", bg=COLORS["panel_bg"], fg=COLORS["muted"], font=("Segoe UI", 9)).pack(pady=(10, 5))
+        
+        text_box = scrolledtext.ScrolledText(top, width=50, height=15, bg=COLORS["input_bg"], fg=COLORS["text"], insertbackground=COLORS["text"], font=("Consolas", 10))
+        text_box.pack(padx=20, pady=5, fill="both", expand=True)
+        
+        header = rows[0] if rows else ["Job Title", "Location"]
+        content = ""
+        for r in rows[1:]:
+            title = r[0] if len(r) > 0 else ""
+            loc = r[1] if len(r) > 1 else ""
+            if title or loc:
+                content += f"{title} | {loc}\n"
+        text_box.insert("1.0", content)
+        
+        def save():
+            try:
+                self.edit_kw_btn.configure(text="Saving...", state="disabled")
+                top.update()
+                
+                new_text = text_box.get("1.0", "end-1c").strip()
+                lines = new_text.split('\n')
+                new_rows = [header]
+                for line in lines:
+                    if not line.strip(): continue
+                    parts = line.split('|', 1)
+                    t = parts[0].strip()
+                    l = parts[1].strip() if len(parts) > 1 else "United States"
+                    new_rows.append([t, l])
+                    
+                ws.clear()
+                ws.update('A1', new_rows)
+                top.destroy()
+                from tkinter import messagebox
+                messagebox.showinfo("Success", "Keywords synced to Google Sheet2 successfully!")
+            except Exception as e:
+                from tkinter import messagebox
+                messagebox.showerror("Error", f"Failed to save:\n{e}")
+            finally:
+                self.edit_kw_btn.configure(text="Edit Keywords", state="normal")
+                
+        ttk.Button(top, text="Save to Google Sheets", command=save, style="Accent2.TButton").pack(pady=(5, 15))
+
     def clear_log(self):
         self.log_box.configure(state="normal")
         self.log_box.delete("1.0", "end")
@@ -380,6 +469,26 @@ class BotPanel(tk.Frame):
     def is_running(self):
         return self.process is not None
 
+
+
+def get_available_profiles():
+    profiles = ["All Profiles"]
+    profiles_dir = os.path.join(BASE_DIR, "Job-Bot", "profiles")
+    if os.path.exists(profiles_dir):
+        for f in os.listdir(profiles_dir):
+            if f.endswith(".json"):
+                profiles.append(f[:-5])
+    
+    # Optional: also check resume-bot profiles if different
+    resume_profiles_dir = os.path.join(BASE_DIR, "resume-bot", "profiles")
+    if os.path.exists(resume_profiles_dir):
+        for f in os.listdir(resume_profiles_dir):
+            if f.endswith(".json"):
+                name = f[:-5]
+                if name not in profiles:
+                    profiles.append(name)
+                    
+    return profiles
 
 class ResumeBotPanel(BotPanel):
     """Instead of pasting one job posting URL at a time, this panel reads
@@ -411,15 +520,101 @@ class ResumeBotPanel(BotPanel):
 
         profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
         profile_frame.pack(fill="x", pady=5)
-        tk.Label(profile_frame, text="Profile:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
-        self.selected_profile_var = tk.StringVar(value="All Profiles")
-        self.profile_combo = ttk.Combobox(profile_frame, textvariable=self.selected_profile_var, values=["All Profiles", "Brian Moore", "Jimmy Tran", "Sameul Walker"], state="readonly", width=14, font=("Segoe UI", 9))
-        self.profile_combo.pack(side="left", padx=5)
-
-        tk.Label(profile_frame, text="Or Count:", font=("Segoe UI", 9), fg=COLORS["muted"], bg=COLORS["panel_bg"]).pack(side="left", padx=(10, 2))
+        
+        tk.Label(profile_frame, text="Number of Profiles to Process:", font=("Segoe UI", 10, "bold"), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
         self.num_profiles_var = tk.IntVar(value=1)
-        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=3, font=("Segoe UI", 9))
-        self.profile_spinbox.pack(side="left", padx=2)
+        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10, "bold"), buttonbackground=COLORS["panel_bg"])
+        self.profile_spinbox.pack(side="left", padx=5)
+        
+        self.active_profiles = []
+        
+        # Add a shiny button to upload new profile JSONs dynamically!
+        def _add_profiles():
+            req_count = self.num_profiles_var.get()
+            filepaths = filedialog.askopenfilenames(
+                title=f"Select {req_count} Profile JSON(s)",
+                filetypes=[("JSON Files", "*.json")]
+            )
+            if not filepaths:
+                return
+                
+            if len(filepaths) != req_count:
+                messagebox.showerror("Count Mismatch", f"You set the Count to {req_count}, but selected {len(filepaths)} files!\n\nPlease select exactly {req_count} file(s).")
+                return
+                
+            try:
+                sheet = self._connect_sheet()
+                headers = sheet.row_values(1)
+            except Exception as e:
+                messagebox.showerror("Sheet Error", f"Could not connect to Google Sheet:\n{e}")
+                return
+                
+            added_count = 0
+            self.active_profiles = []
+            
+            for fp in filepaths:
+                try:
+                    import json
+                    with open(fp, 'r', encoding='utf-8') as jsf:
+                        data = json.load(jsf)
+                    
+                    # Determine profile name
+                    prof_name = data.get("name", "").strip()
+                    if not prof_name:
+                        # fallback to filename
+                        prof_name = os.path.basename(fp).replace(".json", "")
+                        
+                    # Title case the name for aesthetics
+                    prof_name = prof_name.title()
+                        
+                    # Save to profiles directories
+                    import shutil
+                    dest1 = os.path.join(JOBBOT_DIR, "profiles", f"{prof_name}.json")
+                    dest2 = os.path.join(RESUMEBOT_DIR, "profiles", f"{prof_name}.json")
+                    
+                    os.makedirs(os.path.dirname(dest1), exist_ok=True)
+                    os.makedirs(os.path.dirname(dest2), exist_ok=True)
+                    
+                    shutil.copy(fp, dest1)
+                    shutil.copy(fp, dest2)
+                    
+                    self.active_profiles.append(prof_name)
+                    
+                    # Check sheet headers
+                    headers_lower = [str(h).strip().lower() for h in headers]
+                    if prof_name.lower() not in headers_lower:
+                        # Append to sheet
+                        new_col_idx = len(headers) + 1
+                        sheet.update_cell(1, new_col_idx, prof_name)
+                        headers.append(prof_name)  # update local cache for next iteration
+                        self._append_log(f"\n[+] Added new profile column '{prof_name}' to Google Sheet!\n")
+                        added_count += 1
+                        
+                except Exception as e:
+                    self._append_log(f"\n[!] Failed to process profile file '{os.path.basename(fp)}': {e}\n")
+                    
+            # Update UI label
+            if self.active_profiles:
+                profiles_str = ", ".join(self.active_profiles)
+                self.target_profiles_lbl.configure(text=f"Target Profiles: {profiles_str}", fg="#4CAF50")
+            
+            messagebox.showinfo("Success", f"Successfully imported {len(self.active_profiles)} profile(s)!")
+
+        tk.Button(
+            profile_frame, 
+            text="➕ Add Profiles", 
+            command=_add_profiles, 
+            bg="#2B579A", 
+            fg="white", 
+            font=("Segoe UI", 9, "bold"), 
+            cursor="hand2",
+            relief="flat",
+            padx=8
+        ).pack(side="left", padx=(15, 5))
+        
+        # Label to show the targeted profiles below it
+        self.target_profiles_lbl = tk.Label(parent, text="Target Profiles: Default (First N in Sheet)", font=("Segoe UI", 8, "italic"), fg=COLORS["muted"], bg=COLORS["panel_bg"])
+        self.target_profiles_lbl.pack(anchor="w", padx=5, pady=(0, 5))
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -485,6 +680,15 @@ class ResumeBotPanel(BotPanel):
     def _set_status(self, text):
         self.after(0, lambda: self.status_label.configure(text=text, fg=COLORS["running"]))
 
+    def _get_cmd(self, script_name, *args):
+        exe_name = script_name.replace(".py", ".exe")
+        if os.path.exists(os.path.join(self.cwd, exe_name)):
+            cmd = [os.path.join(self.cwd, exe_name)]
+        else:
+            cmd = [sys.executable, "-u", script_name]
+        cmd.extend(args)
+        return cmd
+
     @staticmethod
     def _slugify(text):
         """Mirrors fetch_jd.py's own slugify() exactly, so the jd_<slug>.txt
@@ -544,10 +748,12 @@ class ResumeBotPanel(BotPanel):
         self._last_output = ""
         try:
             proc = subprocess.Popen(
-                cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, bufsize=1, encoding="utf-8", errors="replace"
-            )
+                    cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, bufsize=1,
+                    creationflags=0x08000000,
+                    env=os.environ.copy()
+                )
         except Exception as e:
             self._append_log(f"Failed to launch: {e}\n")
             return 1
@@ -579,13 +785,10 @@ class ResumeBotPanel(BotPanel):
                     self._finish()
                     return
 
-            selected_prof = getattr(self, "selected_profile_var", None)
-            chosen = selected_prof.get().strip() if selected_prof else "All Profiles"
-            if chosen and chosen != "All Profiles":
-                profile_names = [chosen]
-                num_profiles = 1
+            num_profiles = self.num_profiles_var.get()
+            if hasattr(self, 'active_profiles') and self.active_profiles:
+                profile_names = self.active_profiles
             else:
-                num_profiles = self.num_profiles_var.get()
                 # Profiles start at column index 8 (0-based) which is column I (1-based is 9)
                 profile_names = headers[8:8+num_profiles]
 
@@ -626,7 +829,7 @@ class ResumeBotPanel(BotPanel):
 
                 self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
                 self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
-                code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
+                code = self._run_subprocess(self._get_cmd("fetch_jd.py", link, company))
                 if code is None:
                     break
                 if code != 0:
@@ -634,7 +837,7 @@ class ResumeBotPanel(BotPanel):
                     if self._sleep_unless_stopped(15):
                         break
                     self._append_log(f"$ fetch_jd.py {link} \"{company}\" (retry)\n\n")
-                    code = self._run_subprocess([sys.executable, "-u", "fetch_jd.py", link, company])
+                    code = self._run_subprocess(self._get_cmd("fetch_jd.py", link, company))
                     if code is None:
                         break
                 if code != 0:
@@ -688,7 +891,7 @@ class ResumeBotPanel(BotPanel):
 
                 self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
                 self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\"\n\n")
-                code = self._run_subprocess([sys.executable, "-u", "ollama_generate.py", jd_filename, company, profile_name])
+                code = self._run_subprocess(self._get_cmd("ollama_generate.py", jd_filename, company, profile_name))
                 if code is None:
                     break
                 if code != 0:
@@ -743,15 +946,101 @@ class CoverLetterBotPanel(BotPanel):
 
         profile_frame = tk.Frame(parent, bg=COLORS["panel_bg"])
         profile_frame.pack(fill="x", pady=5)
-        tk.Label(profile_frame, text="Profile:", font=("Segoe UI", 10), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
-        self.selected_profile_var = tk.StringVar(value="All Profiles")
-        self.profile_combo = ttk.Combobox(profile_frame, textvariable=self.selected_profile_var, values=["All Profiles", "Brian Moore", "Jimmy Tran", "Sameul Walker"], state="readonly", width=14, font=("Segoe UI", 9))
-        self.profile_combo.pack(side="left", padx=5)
-
-        tk.Label(profile_frame, text="Or Count:", font=("Segoe UI", 9), fg=COLORS["muted"], bg=COLORS["panel_bg"]).pack(side="left", padx=(10, 2))
+        
+        tk.Label(profile_frame, text="Number of Profiles to Process:", font=("Segoe UI", 10, "bold"), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
         self.num_profiles_var = tk.IntVar(value=1)
-        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=3, font=("Segoe UI", 9))
-        self.profile_spinbox.pack(side="left", padx=2)
+        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10, "bold"), buttonbackground=COLORS["panel_bg"])
+        self.profile_spinbox.pack(side="left", padx=5)
+        
+        self.active_profiles = []
+        
+        # Add a shiny button to upload new profile JSONs dynamically!
+        def _add_profiles():
+            req_count = self.num_profiles_var.get()
+            filepaths = filedialog.askopenfilenames(
+                title=f"Select {req_count} Profile JSON(s)",
+                filetypes=[("JSON Files", "*.json")]
+            )
+            if not filepaths:
+                return
+                
+            if len(filepaths) != req_count:
+                messagebox.showerror("Count Mismatch", f"You set the Count to {req_count}, but selected {len(filepaths)} files!\n\nPlease select exactly {req_count} file(s).")
+                return
+                
+            try:
+                sheet = self._connect_sheet()
+                headers = sheet.row_values(1)
+            except Exception as e:
+                messagebox.showerror("Sheet Error", f"Could not connect to Google Sheet:\n{e}")
+                return
+                
+            added_count = 0
+            self.active_profiles = []
+            
+            for fp in filepaths:
+                try:
+                    import json
+                    with open(fp, 'r', encoding='utf-8') as jsf:
+                        data = json.load(jsf)
+                    
+                    # Determine profile name
+                    prof_name = data.get("name", "").strip()
+                    if not prof_name:
+                        # fallback to filename
+                        prof_name = os.path.basename(fp).replace(".json", "")
+                        
+                    # Title case the name for aesthetics
+                    prof_name = prof_name.title()
+                        
+                    # Save to profiles directories
+                    import shutil
+                    dest1 = os.path.join(JOBBOT_DIR, "profiles", f"{prof_name}.json")
+                    dest2 = os.path.join(RESUMEBOT_DIR, "profiles", f"{prof_name}.json")
+                    
+                    os.makedirs(os.path.dirname(dest1), exist_ok=True)
+                    os.makedirs(os.path.dirname(dest2), exist_ok=True)
+                    
+                    shutil.copy(fp, dest1)
+                    shutil.copy(fp, dest2)
+                    
+                    self.active_profiles.append(prof_name)
+                    
+                    # Check sheet headers
+                    headers_lower = [str(h).strip().lower() for h in headers]
+                    if prof_name.lower() not in headers_lower:
+                        # Append to sheet
+                        new_col_idx = len(headers) + 1
+                        sheet.update_cell(1, new_col_idx, prof_name)
+                        headers.append(prof_name)  # update local cache for next iteration
+                        self._append_log(f"\n[+] Added new profile column '{prof_name}' to Google Sheet!\n")
+                        added_count += 1
+                        
+                except Exception as e:
+                    self._append_log(f"\n[!] Failed to process profile file '{os.path.basename(fp)}': {e}\n")
+                    
+            # Update UI label
+            if self.active_profiles:
+                profiles_str = ", ".join(self.active_profiles)
+                self.target_profiles_lbl.configure(text=f"Target Profiles: {profiles_str}", fg="#4CAF50")
+            
+            messagebox.showinfo("Success", f"Successfully imported {len(self.active_profiles)} profile(s)!")
+
+        tk.Button(
+            profile_frame, 
+            text="➕ Add Profiles", 
+            command=_add_profiles, 
+            bg="#2B579A", 
+            fg="white", 
+            font=("Segoe UI", 9, "bold"), 
+            cursor="hand2",
+            relief="flat",
+            padx=8
+        ).pack(side="left", padx=(15, 5))
+        
+        # Label to show the targeted profiles below it
+        self.target_profiles_lbl = tk.Label(parent, text="Target Profiles: Default (First N in Sheet)", font=("Segoe UI", 8, "italic"), fg=COLORS["muted"], bg=COLORS["panel_bg"])
+        self.target_profiles_lbl.pack(anchor="w", padx=5, pady=(0, 5))
 
     def is_running(self):
         return self._thread is not None and self._thread.is_alive()
@@ -809,6 +1098,15 @@ class CoverLetterBotPanel(BotPanel):
     def _set_status(self, text):
         self.after(0, lambda: self.status_label.configure(text=text, fg=COLORS["running"]))
 
+    def _get_cmd(self, script_name, *args):
+        exe_name = script_name.replace(".py", ".exe")
+        if os.path.exists(os.path.join(self.cwd, exe_name)):
+            cmd = [os.path.join(self.cwd, exe_name)]
+        else:
+            cmd = [sys.executable, "-u", script_name]
+        cmd.extend(args)
+        return cmd
+
     @staticmethod
     def _slugify(text):
         text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
@@ -846,8 +1144,7 @@ class CoverLetterBotPanel(BotPanel):
         try:
             self._current_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                creationflags=subprocess.CREATE_NO_WINDOW
-            )
+                creationflags=0x08000000)
             for line in iter(self._current_proc.stdout.readline, ""):
                 if self._stop_requested:
                     self._current_proc.terminate()
@@ -921,10 +1218,10 @@ class CoverLetterBotPanel(BotPanel):
                 cwd_resumebot = RESUMEBOT_DIR
                 self._current_proc = subprocess.Popen(
                     [sys.executable, "-u", "fetch_jd.py", link, company],
-                    cwd=cwd_resumebot,
+                    cwd=self.cwd_resumebot,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
+                    creationflags=0x08000000,
+                    env=os.environ.copy())
                 for line in iter(self._current_proc.stdout.readline, ""):
                     if self._stop_requested:
                         self._current_proc.terminate()
@@ -945,10 +1242,10 @@ class CoverLetterBotPanel(BotPanel):
                 cwd_clbot = r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot"
                 self._current_proc = subprocess.Popen(
                     [sys.executable, "-u", "batch_generate.py", jd_path, company, profile_name],
-                    cwd=cwd_clbot,
+                    cwd=self.cwd_clbot,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    creationflags=subprocess.CREATE_NO_WINDOW
-                )
+                    creationflags=0x08000000,
+                    env=os.environ.copy())
                 for line in iter(self._current_proc.stdout.readline, ""):
                     if self._stop_requested:
                         self._current_proc.terminate()
@@ -1049,6 +1346,11 @@ class ScraperPanel(tk.Frame):
             btn_frame, text="Clear", width=8, command=self.clear_log, style="Secondary.TButton",
         )
         self.clear_btn.pack(side="left", padx=4)
+        
+        self.edit_kw_btn = ttk.Button(
+            btn_frame, text="Edit Keywords", width=14, command=self.edit_keywords, style="Secondary.TButton",
+        )
+        self.edit_kw_btn.pack(side="left", padx=4)
 
         self.status_label = tk.Label(self, text="Idle", fg=COLORS["idle"], bg=COLORS["panel_bg"], font=("Segoe UI", 9))
         self.status_label.pack(pady=(0, 6))
@@ -1104,6 +1406,68 @@ class ScraperPanel(tk.Frame):
                 proc.terminate()
             except Exception:
                 pass
+
+    def edit_keywords(self):
+        try:
+            scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+            from google.oauth2.service_account import Credentials
+            import gspread
+            creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
+            client = gspread.authorize(creds)
+            ws = client.open_by_key(GOOGLE_SHEET_ID).worksheet(SHEET2_NAME)
+            rows = ws.get_all_values()
+        except Exception as e:
+            from tkinter import messagebox
+            messagebox.showerror("Error", f"Failed to load keywords from sheet:\n{e}")
+            return
+            
+        top = tk.Toplevel(self)
+        top.title("Edit Scraper Keywords")
+        top.geometry("500x400")
+        top.configure(bg=COLORS["panel_bg"])
+        top.grab_set()
+        
+        tk.Label(top, text="Format: Job Title | Location\n(One per line)", bg=COLORS["panel_bg"], fg=COLORS["muted"], font=("Segoe UI", 9)).pack(pady=(10, 5))
+        
+        text_box = scrolledtext.ScrolledText(top, width=50, height=15, bg=COLORS["input_bg"], fg=COLORS["text"], insertbackground=COLORS["text"], font=("Consolas", 10))
+        text_box.pack(padx=20, pady=5, fill="both", expand=True)
+        
+        header = rows[0] if rows else ["Job Title", "Location"]
+        content = ""
+        for r in rows[1:]:
+            title = r[0] if len(r) > 0 else ""
+            loc = r[1] if len(r) > 1 else ""
+            if title or loc:
+                content += f"{title} | {loc}\n"
+        text_box.insert("1.0", content)
+        
+        def save():
+            try:
+                self.edit_kw_btn.configure(text="Saving...", state="disabled")
+                top.update()
+                
+                new_text = text_box.get("1.0", "end-1c").strip()
+                lines = new_text.split('\n')
+                new_rows = [header]
+                for line in lines:
+                    if not line.strip(): continue
+                    parts = line.split('|', 1)
+                    t = parts[0].strip()
+                    l = parts[1].strip() if len(parts) > 1 else "United States"
+                    new_rows.append([t, l])
+                    
+                ws.clear()
+                ws.update('A1', new_rows)
+                top.destroy()
+                from tkinter import messagebox
+                messagebox.showinfo("Success", "Keywords synced to Google Sheet2 successfully!")
+            except Exception as e:
+                from tkinter import messagebox
+                messagebox.showerror("Error", f"Failed to save:\n{e}")
+            finally:
+                self.edit_kw_btn.configure(text="Edit Keywords", state="normal")
+                
+        ttk.Button(top, text="Save to Google Sheets", command=save, style="Accent2.TButton").pack(pady=(5, 15))
 
     def clear_log(self):
         def _do():
@@ -1229,6 +1593,8 @@ class ScraperPanel(tk.Frame):
                     cmd, cwd=cwd, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
+                    creationflags=0x08000000,
+                    env=os.environ.copy()
                 )
             except Exception as e:
                 msg = f"Failed to launch {label}: {e}\n"
@@ -1326,11 +1692,11 @@ class ScraperPanel(tk.Frame):
 
             platform_specs = [
                 ("Glassdoor", GLASSD_DIR,
-                 [sys.executable, "-u", "glassdoor_scraper_final.py", title, location]),
+                 [os.path.join(GLASSD_DIR, "glassdoor_scraper_final.exe"), title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", title, location]),
                 ("Hiring Cafe", HIRINGCAFE_DIR,
-                 [sys.executable, "-u", "scraper.py", title, location]),
+                 [os.path.join(HIRINGCAFE_DIR, "scraper.exe"), title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "scraper.py", title, location]),
                 ("Jobgether", JOBGETHER_DIR,
-                 [sys.executable, "-u", "jobgether_scraper.py", title, "15"]),
+                 [os.path.join(JOBGETHER_DIR, "jobgether_scraper.exe"), title, "15"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "jobgether_scraper.py", title, "15"]),
             ]
             # Run all 3 platforms for this keyword at once - independent
             # subprocesses with their own Chrome profiles, so nothing is
@@ -1361,8 +1727,448 @@ class ScraperPanel(tk.Frame):
         self._close_run_logs(end_label, elapsed)
 
 
+
+def check_prerequisites(root):
+    import os
+    import sys
+    import subprocess
+    import shutil
+    import tkinter as tk
+    from tkinter import filedialog, messagebox, messagebox, ttk
+    import webbrowser
+    
+    # 1. Check Service Account
+    sa_paths = [
+        os.path.join(CURRENT_DIR, "service_account.json"),
+        os.path.join(JOBBOT_DIR, "service_account.json"),
+    ]
+    sa_found = any(os.path.exists(p) for p in sa_paths)
+        
+    # 2. Check .env and vars
+    env_path = os.path.join(CURRENT_DIR, ".env")
+    env_dict = {
+        "OLLAMA_MODEL": "qwen2.5-coder:7b",
+        "OLLAMA_HOST": "http://localhost:11434",
+        "GOOGLE_SHEET_ID": ""
+    }
+    
+    if os.path.exists(env_path):
+        try:
+            with open(env_path, "r", encoding="utf-8") as f:
+                for line in f:
+                    if "=" in line and not line.strip().startswith("#"):
+                        k, v = line.split("=", 1)
+                        env_dict[k.strip()] = v.strip()
+        except:
+            pass
+            
+    sheet_id = env_dict.get("GOOGLE_SHEET_ID", "")
+            
+    # 3. Check Ollama
+    ollama_ok = False
+    try:
+        if subprocess.run("ollama --version", shell=True, capture_output=True, timeout=5).returncode == 0:
+            ollama_ok = True
+    except:
+        pass
+        
+    # SHOW GUI!
+    setup_win = tk.Toplevel(root)
+    setup_win.title("Job Bot Configuration Wizard")
+    setup_win.geometry("900x820")
+    setup_win.grab_set()
+    def on_window_close():
+        import sys
+        root.destroy()
+        import os; os._exit(0)
+    setup_win.protocol('WM_DELETE_WINDOW', on_window_close)
+
+    
+    bg_color = "#121212"
+    panel_bg = "#1E1E1E"
+    fg_color = "#E0E0E0"
+    accent = "#0078D4"
+    help_color = "#999999"
+    success_color = "#107C10"
+    error_color = "#E81123"
+    
+    setup_win.configure(bg=bg_color)
+    
+    # Header
+    header_frame = tk.Frame(setup_win, bg=bg_color)
+    header_frame.pack(fill="x", pady=(25, 10))
+    tk.Label(header_frame, text="Job Bot Configuration Wizard", font=("Segoe UI", 20, "bold"), bg=bg_color, fg="#FFFFFF").pack()
+    tk.Label(header_frame, text="Complete the setup below to get your Job Bot running smoothly.", fg=help_color, bg=bg_color, font=("Segoe UI", 11)).pack(pady=5)
+    
+    # Main scrollable area
+    canvas_frame = tk.Frame(setup_win, bg=bg_color)
+    canvas_frame.pack(fill="both", expand=True, padx=20, pady=10)
+    
+    canvas = tk.Canvas(canvas_frame, bg=bg_color, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+    scrollable_frame = tk.Frame(canvas, bg=bg_color)
+    
+    scrollable_frame.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    frame_id = canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(frame_id, width=e.width))
+    canvas.configure(yscrollcommand=scrollbar.set)
+    
+    # Mousewheel scrolling
+    def _on_mousewheel(event):
+        try:
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+        except Exception:
+            pass
+        
+    canvas.bind_all("<MouseWheel>", _on_mousewheel)
+    
+    canvas.pack(side="left", fill="both", expand=True)
+    scrollbar.pack(side="right", fill="y")
+    
+    frame = scrollable_frame
+    
+    # Section 1
+    f1 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
+    f1.pack(fill="x", pady=10, padx=5)
+    f1.columnconfigure(0, weight=1)
+    f1.columnconfigure(1, weight=0)
+    f1.columnconfigure(2, weight=0)
+    
+    tk.Label(f1, text="1. Google Cloud Service Account", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=3, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f1, text="This is the .json key file that grants the bot access to your Google Sheet.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=3, sticky="w", padx=20, pady=(0, 15))
+    
+    sa_var = tk.StringVar(value="Status: Found ?" if sa_found else "Status: Missing ?")
+    tk.Label(f1, textvariable=sa_var, bg=panel_bg, fg=success_color if sa_found else error_color, font=("Segoe UI", 11, "bold")).grid(row=2, column=0, sticky="w", padx=20, pady=(0, 5))
+    
+    sa_text = tk.Text(f1, height=12, width=65, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 9), relief="flat")
+    sa_text.grid(row=3, column=0, columnspan=3, sticky="ew", padx=20, pady=5)
+    
+    if sa_found:
+        try:
+            with open(os.path.join(CURRENT_DIR, "service_account.json"), "r", encoding="utf-8") as _f:
+                sa_text.insert("1.0", _f.read())
+        except: pass
+
+    def upload_sa():
+        filepath = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
+        if filepath:
+            try:
+                with open(filepath, "r", encoding="utf-8") as _f:
+                    content = _f.read()
+                sa_text.delete("1.0", tk.END)
+                sa_text.insert("1.0", content)
+                sa_var.set("Status: Loaded into editor ?")
+            except Exception as e:
+                from tkinter import messagebox
+                messagebox.showerror("Error", f"Failed to read file: {e}")
+            
+    tk.Button(f1, text="Browse & Upload .json", command=upload_sa, bg="#333333", fg=fg_color, font=("Segoe UI", 10), cursor="hand2", relief="flat", padx=15, pady=4).grid(row=2, column=1, sticky="w", padx=10)
+    
+    tk.Label(f1, text="?? How to get it: Google Cloud Console > IAM & Admin > Service Accounts > Create Key (JSON)", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=4, column=0, columnspan=3, sticky="w", padx=20, pady=(15, 20))
+    
+    # Section 2
+    f2 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
+    f2.pack(fill="x", pady=10, padx=5)
+    
+    tk.Label(f2, text="2. Google Sheet ID", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f2, text="The unique ID of the Google Sheet where jobs are stored.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
+    
+    sheet_entry = tk.Entry(f2, width=65, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
+    sheet_entry.grid(row=2, column=0, columnspan=2, sticky="ew", padx=20, pady=5, ipady=5)
+    f2.columnconfigure(0, weight=1)
+    sheet_entry.insert(0, sheet_id)
+    
+    tk.Label(f2, text="ℹ️ Look at your sheet URL: docs.google.com/spreadsheets/d/[THIS_IS_THE_ID]/edit", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(5, 5))
+    tk.Label(f2, text="⚠️ CRITICAL: You must share your sheet with the Service Account email as an Editor!", bg=panel_bg, fg="#FFB900", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 20))
+    
+
+    # Section 2.5: Email Verification
+
+
+    # Section 3
+    f3 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
+    f3.pack(fill="x", pady=10, padx=5)
+    
+    tk.Label(f3, text="3. Ollama AI Engine", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f3, text="Ollama powers the dynamic resume generation and cover letter writing.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
+    
+    status_frame = tk.Frame(f3, bg=panel_bg)
+    status_frame.grid(row=2, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
+    tk.Label(status_frame, text="Status:", font=("Segoe UI", 11), bg=panel_bg, fg=fg_color).pack(side="left")
+    tk.Label(status_frame, text=" Installed & Running ✔ " if ollama_ok else " Not Installed / Not Running ✖ ", bg=success_color if ollama_ok else error_color, fg="#FFFFFF", font=("Segoe UI", 10, "bold")).pack(side="left", padx=10)
+    
+    if not ollama_ok:
+        tk.Label(f3, text="To run Ollama: Open a terminal and type 'ollama serve' or open the Ollama Desktop App.", bg=panel_bg, fg="#FFB900", font=("Segoe UI", 10, "bold")).grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 5))
+        def open_ollama(): webbrowser.open("https://ollama.com/download")
+        tk.Button(f3, text="Download Ollama", command=open_ollama, bg="#333333", fg=fg_color, relief="flat", cursor="hand2", padx=10).grid(row=4, column=0, sticky="w", padx=20, pady=(0, 15))
+    
+    input_frame = tk.Frame(f3, bg=panel_bg)
+    input_frame.grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 20))
+    
+    tk.Label(input_frame, text="Model Name:", font=("Segoe UI", 10), bg=panel_bg, fg=fg_color).grid(row=0, column=0, sticky="w", pady=5)
+    model_entry = tk.Entry(input_frame, width=25, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
+    model_entry.grid(row=0, column=1, sticky="w", padx=10, pady=5, ipady=4)
+    model_entry.insert(0, env_dict.get("OLLAMA_MODEL", "qwen2.5-coder:7b"))
+    
+    tk.Label(input_frame, text="Host URL:", font=("Segoe UI", 10), bg=panel_bg, fg=fg_color).grid(row=1, column=0, sticky="w", pady=5)
+    host_entry = tk.Entry(input_frame, width=35, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
+    host_entry.grid(row=1, column=1, sticky="w", padx=10, pady=5, ipady=4)
+    host_entry.insert(0, env_dict.get("OLLAMA_HOST", "http://localhost:11434"))
+    
+    tk.Label(input_frame, text="ℹ️ By default, Ollama runs on http://localhost:11434. If running remotely, use its IP address.", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+    
+    # Section 4 - Verification
+    f5 = tk.Frame(frame, bg=bg_color)
+    f5.pack(fill="x", pady=(20, 10), padx=5)
+    
+    def run_verify():
+        c = "# Ollama Configuration\n"
+        c += "OLLAMA_MODEL=" + model_entry.get().strip() + "\n"
+        c += "OLLAMA_HOST=" + host_entry.get().strip() + "\n\n"
+        c += "# Google Sheet Configuration\n"
+        c += "GOOGLE_SHEET_ID=" + sheet_entry.get().strip() + "\n"
+        c += "SERVICE_ACCOUNT_JSON=service_account.json\n"
+        c += "WORKSHEET_NAME=Sheet1\n\n"
+        c += "# Automation Behavior\n"
+        c += "AUTO_SUBMIT=True\n"
+        c += "HEADLESS=False\n"
+        c += "STEALTH_MODE=True\n"
+        c += "MAX_RETRIES=3\n"
+        c += "SCREENSHOT_ON_SUCCESS=True\n"
+
+        email = os.environ.get('JOBBOT_LAUNCHER_AUTH', '')
+        if email: c += "AUTHORIZED_EMAIL=" + email + "\n"
+        
+        verify_log.delete("1.0", tk.END)
+        verify_log.insert(tk.END, "[*] Saving configuration...\n")
+        
+        sa_content = sa_text.get("1.0", tk.END).strip()
+        if sa_content:
+            try:
+                with open(os.path.join(CURRENT_DIR, "service_account.json"), "w", encoding="utf-8") as _f:
+                    _f.write(sa_content)
+            except Exception as e:
+                verify_log.insert(tk.END, f"[!] FAIL: Could not save service_account.json: {e}\n")
+                return
+        with open(env_path, "w", encoding="utf-8") as f:
+            f.write(c)
+            
+        # Distribute .env and service_account.json to all subdirectories so EXEs can find them locally
+        targets_dirs = [GLASSD_DIR, HIRINGCAFE_DIR, JOBGETHER_DIR, RESUMEBOT_DIR, JOBBOT_DIR]
+        for d in targets_dirs:
+            os.makedirs(d, exist_ok=True)
+            shutil.copy2(env_path, os.path.join(d, ".env"))
+            if os.path.exists(SERVICE_ACCOUNT_FILE):
+                shutil.copy2(SERVICE_ACCOUNT_FILE, os.path.join(d, "service_account.json"))
+            
+        verify_log.delete("1.0", tk.END)
+        verify_log.insert(tk.END, "[*] Settings saved to .env!\\n[*] Verifying Google Sheets connection...\\n")
+        setup_win.update()
+        
+        try:
+            import gspread
+            from google.oauth2.service_account import Credentials
+            sa_file = os.path.join(CURRENT_DIR, "service_account.json")
+            if not os.path.exists(sa_file):
+                verify_log.insert(tk.END, "[!] FAIL: service_account.json not found! Please upload it.\\n")
+                return
+                
+            creds = Credentials.from_service_account_file(sa_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+            client = gspread.authorize(creds)
+            
+            sid = sheet_entry.get().strip()
+            if not sid:
+                verify_log.insert(tk.END, "[!] FAIL: Sheet ID is empty!\\n")
+                return
+                
+            try:
+                spreadsheet = client.open_by_key(sid)
+                
+                # Auto-create worksheets if they don't exist
+                existing_titles = [ws.title for ws in spreadsheet.worksheets()]
+                
+                if "Sheet1" not in existing_titles:
+                    verify_log.insert(tk.END, "[*] Sheet1 missing. Creating it...\n")
+                    spreadsheet.add_worksheet(title="Sheet1", rows=1000, cols=20)
+                if "Sheet2" not in existing_titles:
+                    verify_log.insert(tk.END, "[*] Sheet2 missing. Creating it...\n")
+                    ws2 = spreadsheet.add_worksheet(title="Sheet2", rows=1000, cols=10)
+                    ws2.append_row(["Job Title", "Location"])
+                if "Sheet3" not in existing_titles:
+                    verify_log.insert(tk.END, "[*] Sheet3 missing. Creating it...\n")
+                    spreadsheet.add_worksheet(title="Sheet3", rows=1000, cols=20)
+                    
+                sheet = spreadsheet.worksheet("Sheet1")
+            except Exception as e:
+                verify_log.insert(tk.END, "[!] FAIL: Could not open sheet.\\nMake sure you shared the sheet with your Service Account email!\\nError: " + str(e) + "\\n")
+                return
+                
+            headers = [str(h).strip().lower() for h in sheet.row_values(1)] if sheet.row_values(1) else []
+            required = ["company name", "job title", "location", "job age", "job link", "date posted", "platform"]
+            missing_h = [r for r in required if r not in headers]
+            
+            if missing_h:
+                verify_log.insert(tk.END, f"[*] Missing headers detected: {missing_h}. Auto-inserting...\\n")
+                try:
+                    current_len = len(headers)
+                    for i, h in enumerate(missing_h):
+                        sheet.update_cell(1, current_len + i + 1, h.title())
+                    verify_log.insert(tk.END, "[+] SUCCESS: Missing headers auto-inserted into Row 1!\\n")
+                except Exception as e:
+                    verify_log.insert(tk.END, "[!] FAIL: Could not insert headers: " + str(e) + "\\n")
+                    return
+            else:
+                verify_log.insert(tk.END, "[+] SUCCESS: Required headers are present.\\n")
+                
+            # Check write access
+            try:
+                val = sheet.acell('A1').value
+                sheet.update_acell('A1', val or "")
+                verify_log.insert(tk.END, "[+] SUCCESS: Write access verified! Everything looks great.\\n")
+                btn_done.configure(state="normal", bg=success_color)
+            except Exception as e:
+                verify_log.insert(tk.END, "[!] FAIL: Cannot write to sheet (read-only?): " + str(e) + "\\n")
+                    
+        except Exception as e:
+            verify_log.insert(tk.END, "[!] FAIL: " + str(e) + "\\n")
+            
+    tk.Button(f5, text="⟳ Save & Verify Settings", command=run_verify, bg=accent, fg="white", font=("Segoe UI", 12, "bold"), cursor="hand2", relief="flat", padx=20, pady=8).pack()
+    
+    verify_log = tk.Text(f5, height=8, width=80, bg="#000000", fg="#00FF00", font=("Consolas", 10), relief="flat")
+    verify_log.pack(pady=20)
+    
+    # Footer (Packed at the absolute bottom)
+    footer_frame = tk.Frame(setup_win, bg="#121212")
+    footer_frame.pack(side="bottom", fill="x", pady=20)
+    
+    def on_done():
+        setup_win.destroy()
+        
+    btn_done = tk.Button(footer_frame, text="✔ I'm Done, Launch App", command=on_done, font=("Segoe UI", 14, "bold"), bg="#555555", fg="white", cursor="hand2", relief="flat", padx=30, pady=12, state="disabled")
+    btn_done.pack()
+    
+    root.wait_window(setup_win)
+    
+    # Re-check silently
+    sa_paths = [os.path.join(CURRENT_DIR, "service_account.json")]
+    if not any(os.path.exists(p) for p in sa_paths): return False
+    
+    has_sid = False
+    if os.path.exists(env_path):
+        with open(env_path, "r", encoding="utf-8") as f:
+            for line in f:
+                if "GOOGLE_SHEET_ID=" in line and len(line.split("=")[1].strip()) > 5:
+                    has_sid = True
+    if not has_sid: return False
+    return True
+
+def run_auth_check(root):
+    import urllib.request, urllib.parse, json, os, shutil
+    from tkinter import simpledialog, messagebox
+    import tkinter as tk
+    
+    env_path = os.path.join(CURRENT_DIR, '.env')
+    email = ''
+    if os.path.exists(env_path):
+        with open(env_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                if line.startswith('AUTHORIZED_EMAIL='):
+                    email = line.split('=', 1)[1].strip()
+                    
+    def verify_email(e):
+        try:
+            url = 'http://127.0.0.1:8000/api/verify-email'
+            data = urllib.parse.urlencode({'email': e}).encode('utf-8')
+            req = urllib.request.Request(url, data=data)
+            with urllib.request.urlopen(req) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                return result.get('valid'), result.get('message', 'Failed')
+        except Exception as ex:
+            return False, f'API Error: {ex}'
+            
+    if email:
+        valid, msg = verify_email(email)
+        if valid:
+            os.environ['JOBBOT_LAUNCHER_AUTH'] = email
+            return True
+            
+    # Need to prompt user
+    while True:
+        dialog = tk.Toplevel(root)
+        dialog.title('Authentication Required')
+        dialog.geometry('400x150')
+        dialog.grab_set()
+
+        def on_auth_close():
+            import sys
+            root.destroy()
+            import os; os._exit(0)
+        dialog.protocol('WM_DELETE_WINDOW', on_auth_close)
+
+        
+        tk.Label(dialog, text='Enter your Authorized Email:', font=('Segoe UI', 11)).pack(pady=10)
+        entry = tk.Entry(dialog, width=40, font=('Segoe UI', 11))
+        entry.pack(pady=5)
+        if email: entry.insert(0, email)
+        
+        result_email = [None]
+        def submit():
+            result_email[0] = entry.get().strip()
+            dialog.destroy()
+            
+        tk.Button(dialog, text='Verify', command=submit, bg='#0078D4', fg='white', width=15).pack(pady=10)
+        
+        root.wait_window(dialog)
+        
+        if not result_email[0]:
+            return False # Cancelled
+            
+        valid, msg = verify_email(result_email[0])
+        if valid:
+            # Append to .env
+            env_content = ''
+            if os.path.exists(env_path):
+                with open(env_path, 'r', encoding='utf-8') as f:
+                    env_content = f.read()
+                    
+            import re
+            if 'AUTHORIZED_EMAIL=' in env_content:
+                env_content = re.sub(r'AUTHORIZED_EMAIL=.*', f'AUTHORIZED_EMAIL={result_email[0]}', env_content)
+            else:
+                env_content += f'\nAUTHORIZED_EMAIL={result_email[0]}\n'
+                
+            with open(env_path, 'w', encoding='utf-8') as f:
+                f.write(env_content)
+                
+            # Copy to subdirs so scrapers get it
+            for d in ['GlassD', 'Hiring_cafe', 'Jobgether', 'resume-bot']:
+                dpath = os.path.join(os.path.dirname(CURRENT_DIR), d)
+                if not os.path.exists(dpath): dpath = os.path.join(CURRENT_DIR, '..', 'scraper', d)
+                if os.path.exists(dpath):
+                    shutil.copy2(env_path, os.path.join(dpath, '.env'))
+                    
+            os.environ['JOBBOT_LAUNCHER_AUTH'] = result_email[0]
+            messagebox.showinfo('Success', 'Authentication successful!')
+            return True
+        else:
+            messagebox.showerror('Error', f'Verification failed: {msg}')
+            email = result_email[0] # keep it for next loop
+
+
 def main():
     root = tk.Tk()
+    root.withdraw() # Hide window during check
+    
+    if not run_auth_check(root):
+        root.destroy()
+        sys.exit(1)
+
+    if not check_prerequisites(root):
+        root.destroy()
+        sys.exit(1)
+        
+    root.deiconify() # Show window after check
+
     root.title("Job Bot Launcher")
     root.configure(bg=COLORS["bg"])
     root.geometry("1900x780")
@@ -1501,7 +2307,7 @@ def main():
         "main.py", JOBBOT_DIR,
         log_dir=os.path.join(LOGS_DIR, "Application Bot"), log_prefix="apply",
     )
-    apply_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+    # apply_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6) # Hidden for now
 
     def on_close():
         scraper_panel.terminate_now()
