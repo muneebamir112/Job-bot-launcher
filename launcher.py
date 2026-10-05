@@ -575,8 +575,10 @@ class ResumeBotPanel(BotPanel):
                     os.makedirs(os.path.dirname(dest1), exist_ok=True)
                     os.makedirs(os.path.dirname(dest2), exist_ok=True)
                     
-                    shutil.copy(fp, dest1)
-                    shutil.copy(fp, dest2)
+                    if os.path.abspath(fp) != os.path.abspath(dest1):
+                        shutil.copy(fp, dest1)
+                    if os.path.abspath(fp) != os.path.abspath(dest2):
+                        shutil.copy(fp, dest2)
                     
                     self.active_profiles.append(prof_name)
                     
@@ -704,7 +706,11 @@ class ResumeBotPanel(BotPanel):
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
         client = gspread.authorize(creds)
-        return client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        try:
+            return spreadsheet.worksheet("Jobs")
+        except:
+            return spreadsheet.sheet1
 
     def _fetch_jobs(self, ws):
         rows = ws.get_all_values()[1:]  # skip header row
@@ -810,7 +816,7 @@ class ResumeBotPanel(BotPanel):
                     except ValueError:
                         continue
                         
-                    pdf_path = os.path.join(CVS_DIR, company, f"{profile_name}.pdf")
+                    pdf_path = os.path.join(CVS_DIR, f"{profile_name} - {company}.pdf")
                     if not os.path.exists(pdf_path):
                         todo.append((company, link, row, profile_name, col_index))
 
@@ -1001,8 +1007,10 @@ class CoverLetterBotPanel(BotPanel):
                     os.makedirs(os.path.dirname(dest1), exist_ok=True)
                     os.makedirs(os.path.dirname(dest2), exist_ok=True)
                     
-                    shutil.copy(fp, dest1)
-                    shutil.copy(fp, dest2)
+                    if os.path.abspath(fp) != os.path.abspath(dest1):
+                        shutil.copy(fp, dest1)
+                    if os.path.abspath(fp) != os.path.abspath(dest2):
+                        shutil.copy(fp, dest2)
                     
                     self.active_profiles.append(prof_name)
                     
@@ -1120,7 +1128,11 @@ class CoverLetterBotPanel(BotPanel):
         scopes = ["https://www.googleapis.com/auth/spreadsheets"]
         creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
         client = gspread.authorize(creds)
-        return client.open_by_key(GOOGLE_SHEET_ID).sheet1
+        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
+        try:
+            return spreadsheet.worksheet("Jobs")
+        except:
+            return spreadsheet.sheet1
 
     def _fetch_jobs(self, ws):
         rows = ws.get_all_values()[1:]  # skip header row
@@ -1187,11 +1199,11 @@ class CoverLetterBotPanel(BotPanel):
                 profile_names = headers[8:8+num_profiles]
 
             todo = []
-            COVERLETTER_DIR = r"C:\Users\webNcodes\Desktop\coverletter"
+            COVERLETTER_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CVs")
             for company, link, row, row_data in jobs:
                 for profile_name in profile_names:
                     # Don't check the Google sheet for cover letter status, just check the file!
-                    pdf_path = os.path.join(COVERLETTER_DIR, company, f"Cover Letter - {profile_name}.pdf")
+                    pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
                     if not os.path.exists(pdf_path):
                         todo.append((company, link, row, profile_name))
 
