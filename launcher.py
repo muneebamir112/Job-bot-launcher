@@ -1994,29 +1994,11 @@ def check_prerequisites(root):
                     verify_log.insert(tk.END, "[*] Sheet2 missing. Creating it...\n")
                     ws2 = spreadsheet.add_worksheet(title="Sheet2", rows=1000, cols=10)
                     ws2.append_row(["Job Title", "Location"])
-                if "Sheet3" not in existing_titles:
-                    verify_log.insert(tk.END, "[*] Sheet3 missing. Creating it...\n")
-                    spreadsheet.add_worksheet(title="Sheet3", rows=1000, cols=20)
-                    
                 sheet = spreadsheet.worksheet("Sheet1")
             except Exception as e:
                 verify_log.insert(tk.END, "[!] FAIL: Could not open sheet.\\nMake sure you shared the sheet with your Service Account email!\\nError: " + str(e) + "\\n")
                 return
                 
-            headers = [str(h).strip().lower() for h in sheet.row_values(1)] if sheet.row_values(1) else []
-            required = ["company name", "job title", "location", "job age", "job link", "date posted", "platform"]
-            missing_h = [r for r in required if r not in headers]
-            
-            if missing_h:
-                verify_log.insert(tk.END, f"[*] Missing headers detected: {missing_h}. Auto-inserting...\\n")
-                try:
-                    current_len = len(headers)
-                    for i, h in enumerate(missing_h):
-                        sheet.update_cell(1, current_len + i + 1, h.title())
-                    verify_log.insert(tk.END, "[+] SUCCESS: Missing headers auto-inserted into Row 1!\\n")
-                except Exception as e:
-                    verify_log.insert(tk.END, "[!] FAIL: Could not insert headers: " + str(e) + "\\n")
-                    return
             else:
                 verify_log.insert(tk.END, "[+] SUCCESS: Required headers are present.\\n")
                 
