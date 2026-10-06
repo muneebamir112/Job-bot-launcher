@@ -2286,7 +2286,7 @@ def main():
 
     # Add Auto-Pilot controls
     autopilot_frame = tk.Frame(header, bg=COLORS["bg"])
-    autopilot_frame.pack(side="right", padx=10)
+    # autopilot_frame.pack(side="right", padx=10)
     
     tk.Label(
         autopilot_frame, text="Auto-Pilot Pipeline:", font=("Segoe UI", 10, "bold"),
