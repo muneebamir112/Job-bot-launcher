@@ -49,11 +49,9 @@ from google.oauth2.service_account import Credentials
 
 import os
 if getattr(sys, 'frozen', False):
-    # If compiled with PyInstaller, sys.executable is the .exe file path
-    # The .exe is inside JobBot_Pro_Release/Job-bot-launcher/launcher.exe
-    # So we go up one level to get BASE_DIR
-    _current_dir = os.path.dirname(sys.executable)
-    BASE_DIR = os.path.dirname(_current_dir)
+    # If compiled with PyInstaller in monolithic mode, sys.executable is JobBot_Pro_Release\jobbot.exe
+    # So BASE_DIR is just the directory containing the exe.
+    BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(CURRENT_DIR)
 GLASSD_DIR = os.path.join(BASE_DIR, "scraper", "GlassD")
@@ -473,21 +471,22 @@ class BotPanel(tk.Frame):
 
 def get_available_profiles():
     profiles = ["All Profiles"]
-    profiles_dir = os.path.join(BASE_DIR, "Job-Bot", "profiles")
+    profiles_dir = os.path.join(BASE_DIR, "profiles") if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "Job-Bot", "profiles")
     if os.path.exists(profiles_dir):
         for f in os.listdir(profiles_dir):
             if f.endswith(".json"):
                 profiles.append(f[:-5])
-    
-    # Optional: also check resume-bot profiles if different
-    resume_profiles_dir = os.path.join(BASE_DIR, "resume-bot", "profiles")
-    if os.path.exists(resume_profiles_dir):
-        for f in os.listdir(resume_profiles_dir):
-            if f.endswith(".json"):
-                name = f[:-5]
-                if name not in profiles:
-                    profiles.append(name)
-                    
+                
+    if not getattr(sys, 'frozen', False):
+        # Optional: also check resume-bot profiles if different
+        resume_profiles_dir = os.path.join(BASE_DIR, "resume-bot", "profiles")
+        if os.path.exists(resume_profiles_dir):
+            for f in os.listdir(resume_profiles_dir):
+                if f.endswith(".json"):
+                    name = f[:-5]
+                    if name not in profiles:
+                        profiles.append(name)
+                        
     return profiles
 
 class ResumeBotPanel(BotPanel):
@@ -570,16 +569,22 @@ class ResumeBotPanel(BotPanel):
                         
                     # Save to profiles directories
                     import shutil
-                    dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
-                    dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
-                    
-                    os.makedirs(os.path.dirname(dest1), exist_ok=True)
-                    os.makedirs(os.path.dirname(dest2), exist_ok=True)
-                    
-                    if os.path.abspath(fp) != os.path.abspath(dest1):
-                        shutil.copy(fp, dest1)
-                    if os.path.abspath(fp) != os.path.abspath(dest2):
-                        shutil.copy(fp, dest2)
+                    if getattr(sys, 'frozen', False):
+                        dest1 = os.path.join(BASE_DIR, "profiles", f"{prof_name}.json")
+                        os.makedirs(os.path.dirname(dest1), exist_ok=True)
+                        if os.path.abspath(fp) != os.path.abspath(dest1):
+                            shutil.copy(fp, dest1)
+                    else:
+                        dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
+                        dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
+                        
+                        os.makedirs(os.path.dirname(dest1), exist_ok=True)
+                        os.makedirs(os.path.dirname(dest2), exist_ok=True)
+                        
+                        if os.path.abspath(fp) != os.path.abspath(dest1):
+                            shutil.copy(fp, dest1)
+                        if os.path.abspath(fp) != os.path.abspath(dest2):
+                            shutil.copy(fp, dest2)
                     
                     self.active_profiles.append(prof_name)
                     
@@ -684,10 +689,14 @@ class ResumeBotPanel(BotPanel):
         self.after(0, lambda: self.status_label.configure(text=text, fg=COLORS["running"]))
 
     def _get_cmd(self, script_name, *args):
-        exe_name = script_name.replace(".py", ".exe")
-        if os.path.exists(os.path.join(self.cwd, exe_name)):
-            cmd = [os.path.join(self.cwd, exe_name)]
+        # Monolithic PyInstaller Entrypoint Logic
+        # We strip the .py extension to get the command name (e.g. fetch_jd, batch_generate)
+        command_name = script_name.replace(".py", "")
+        if getattr(sys, 'frozen', False):
+            # In compiled mode, sys.executable is jobbot.exe
+            cmd = [sys.executable, command_name]
         else:
+            # In local source mode, run the script directly with python
             cmd = [sys.executable, "-u", script_name]
         cmd.extend(args)
         return cmd
@@ -754,23 +763,28 @@ class ResumeBotPanel(BotPanel):
         log box, and return its exit code (or None if Stop was hit)."""
         self._last_output = ""
         try:
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
             proc = subprocess.Popen(
                     cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, bufsize=1,
+                    text=True, bufsize=1, encoding='utf-8', errors='replace',
                     creationflags=0x08000000,
-                    env=os.environ.copy()
+                    env=env
                 )
         except Exception as e:
             self._append_log(f"Failed to launch: {e}\n")
             return 1
         self._current_proc = proc
         out_lines = []
-        for line in proc.stdout:
-            self._append_log(line)
-            out_lines.append(line)
-            if self._stop_requested:
-                proc.terminate()
+        try:
+            for line in iter(proc.stdout.readline, ""):
+                self._append_log(line)
+                out_lines.append(line)
+                if self._stop_requested:
+                    proc.terminate()
+        except Exception as e:
+            self._append_log(f"\n[Error reading stream: {e}]\n")
         self._last_output = "".join(out_lines)
         code = proc.wait()
         self._current_proc = None
@@ -1003,16 +1017,22 @@ class CoverLetterBotPanel(BotPanel):
                         
                     # Save to profiles directories
                     import shutil
-                    dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
-                    dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
-                    
-                    os.makedirs(os.path.dirname(dest1), exist_ok=True)
-                    os.makedirs(os.path.dirname(dest2), exist_ok=True)
-                    
-                    if os.path.abspath(fp) != os.path.abspath(dest1):
-                        shutil.copy(fp, dest1)
-                    if os.path.abspath(fp) != os.path.abspath(dest2):
-                        shutil.copy(fp, dest2)
+                    if getattr(sys, 'frozen', False):
+                        dest1 = os.path.join(BASE_DIR, "profiles", f"{prof_name}.json")
+                        os.makedirs(os.path.dirname(dest1), exist_ok=True)
+                        if os.path.abspath(fp) != os.path.abspath(dest1):
+                            shutil.copy(fp, dest1)
+                    else:
+                        dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
+                        dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
+                        
+                        os.makedirs(os.path.dirname(dest1), exist_ok=True)
+                        os.makedirs(os.path.dirname(dest2), exist_ok=True)
+                        
+                        if os.path.abspath(fp) != os.path.abspath(dest1):
+                            shutil.copy(fp, dest1)
+                        if os.path.abspath(fp) != os.path.abspath(dest2):
+                            shutil.copy(fp, dest2)
                     
                     self.active_profiles.append(prof_name)
                     
@@ -1232,7 +1252,7 @@ class CoverLetterBotPanel(BotPanel):
                 self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
                 
                 # Run fetch_jd from ResumeBot dir
-                cwd_resumebot = RESUMEBOT_DIR
+                cwd_resumebot = BASE_DIR if getattr(sys, 'frozen', False) else RESUMEBOT_DIR
                 cmd_fetch = self._get_cmd("fetch_jd.py", link, company)
                 
                 # temporarily override cwd for fetch
@@ -1252,7 +1272,7 @@ class CoverLetterBotPanel(BotPanel):
                 self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\"\n\n")
                 
                 # Run batch_generate from cover_letter_bot dir
-                cwd_clbot = os.path.join(BASE_DIR, "cover_letter_bot")
+                cwd_clbot = BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "cover_letter_bot")
                 cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name)
                 
                 old_cwd = self.cwd
@@ -1398,7 +1418,8 @@ class ScraperPanel(tk.Frame):
 
     def stop(self):
         self._stop_requested = True
-        self._log("\n--- Stop requested: will halt after the current platforms finish ---\n")
+        self._log("\n--- Stop requested: halting current scrapers immediately ---\n")
+        self.terminate_now()
 
     def terminate_now(self):
         """Hard stop used when the app window is closing — kill whichever
@@ -1697,12 +1718,12 @@ class ScraperPanel(tk.Frame):
             self._set_status(f"[{idx}/{len(titles)}] {title}", COLORS["running"])
 
             platform_specs = [
-                ("Glassdoor", GLASSD_DIR,
-                 [os.path.join(GLASSD_DIR, "glassdoor_scraper_final.exe"), title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", title, location]),
-                ("Hiring Cafe", HIRINGCAFE_DIR,
-                 [os.path.join(HIRINGCAFE_DIR, "scraper.exe"), title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "scraper.py", title, location]),
-                ("Jobgether", JOBGETHER_DIR,
-                 [os.path.join(JOBGETHER_DIR, "jobgether_scraper.exe"), title, "15"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "jobgether_scraper.py", title, "15"]),
+                ("Glassdoor", BASE_DIR if getattr(sys, 'frozen', False) else GLASSD_DIR,
+                 [sys.executable, "glassdoor", title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", title, location]),
+                ("Hiring Cafe", BASE_DIR if getattr(sys, 'frozen', False) else HIRINGCAFE_DIR,
+                 [sys.executable, "hiring_cafe", title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "scraper.py", title, location]),
+                ("Jobgether", BASE_DIR if getattr(sys, 'frozen', False) else JOBGETHER_DIR,
+                 [sys.executable, "jobgether", title, "15"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "jobgether_scraper.py", title, "15"]),
             ]
             # Run all 3 platforms for this keyword at once - independent
             # subprocesses with their own Chrome profiles, so nothing is
@@ -1958,130 +1979,129 @@ def check_prerequisites(root):
     f5 = tk.Frame(frame, bg=bg_color)
     f5.pack(fill="x", pady=(20, 10), padx=5)
     
-    def run_verify():
-        c = "# Ollama Configuration\n"
-        c += "OLLAMA_MODEL=" + model_entry.get().strip() + "\n"
-        c += "OLLAMA_HOST=" + host_entry.get().strip() + "\n\n"
-        c += "# Google Sheet Configuration\n"
-        c += "GOOGLE_SHEET_ID=" + sheet_entry.get().strip() + "\n"
-        c += "RESUMES_SAVE_PATH=" + resume_path_var.get().strip() + "\n"
-        c += "SERVICE_ACCOUNT_JSON=service_account.json\n"
-        
-        c += "# Automation Behavior\n"
-        c += "AUTO_SUBMIT=True\n"
-        c += "HEADLESS=False\n"
-        c += "STEALTH_MODE=True\n"
-        c += "MAX_RETRIES=3\n"
-        c += "SCREENSHOT_ON_SUCCESS=True\n"
-
-        email = os.environ.get('JOBBOT_LAUNCHER_AUTH', '')
-        if email: c += "AUTHORIZED_EMAIL=" + email + "\n"
-        
-        err_sa_lbl.config(fg=error_color)
-        err_sheet_lbl.config(fg=error_color)
-        
-        err_sa_lbl.grid_remove()
-        err_sheet_lbl.grid_remove()
-        err_ollama_lbl.grid_remove()
-        has_errors = False
-        
-        # Check Ollama
-        import urllib.request
-        ollama_url = host_entry.get().strip()
-        try:
-            req = urllib.request.Request(f"{ollama_url}/api/version")
-            with urllib.request.urlopen(req, timeout=3) as resp:
-                if resp.status != 200:
-                    raise Exception("Status not 200")
-        except Exception as e:
-            err_ollama_lbl.config(text=f"Ollama is not running or accessible at {ollama_url}.")
-            err_ollama_lbl.grid()
-            has_errors = True
-        
-        sa_content = sa_text.get("1.0", tk.END).strip()
-        if sa_content:
-            try:
-                with open(os.path.join(CURRENT_DIR, "service_account.json"), "w", encoding="utf-8") as _f:
-                    _f.write(sa_content)
-            except Exception as e:
-                err_sa_lbl.config(text=f"Could not save service_account.json: {e}")
-                err_sa_lbl.grid()
-                has_errors = True
-                
-        if has_errors:
-            return
-            
-        with open(env_path, "w", encoding="utf-8") as f:
-            f.write(c)
-            
-        # Distribute .env and service_account.json to all subdirectories so EXEs can find them locally
-        targets_dirs = [GLASSD_DIR, HIRINGCAFE_DIR, JOBGETHER_DIR, RESUMEBOT_DIR, JOBBOT_DIR]
-        for d in targets_dirs:
-            os.makedirs(d, exist_ok=True)
-            shutil.copy2(env_path, os.path.join(d, ".env"))
-            if os.path.exists(SERVICE_ACCOUNT_FILE):
-                shutil.copy2(SERVICE_ACCOUNT_FILE, os.path.join(d, "service_account.json"))
-            
+    def run_verify(btn_widget):
+        btn_widget.configure(text="Verifying... Please wait...", state="disabled")
         setup_win.update()
-        
         try:
-            import gspread
-            from google.oauth2.service_account import Credentials
-            sa_file = os.path.join(CURRENT_DIR, "service_account.json")
-            if not os.path.exists(sa_file):
-                err_sa_lbl.config(text="service_account.json not found! Please upload it.")
-                err_sa_lbl.grid()
-                return
-                
-            creds = Credentials.from_service_account_file(sa_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
-            client = gspread.authorize(creds)
+            c = "# Ollama Configuration\n"
+            c += "OLLAMA_MODEL=" + model_entry.get().strip() + "\n"
+            c += "OLLAMA_HOST=" + host_entry.get().strip() + "\n\n"
+            c += "# Google Sheet Configuration\n"
+            c += "GOOGLE_SHEET_ID=" + sheet_entry.get().strip() + "\n"
+            c += "RESUMES_SAVE_PATH=" + resume_path_var.get().strip() + "\n"
+            c += "SERVICE_ACCOUNT_JSON=service_account.json\n"
             
-            sid = sheet_entry.get().strip()
-            if not sid:
-                err_sheet_lbl.config(text="Sheet ID is empty!")
-                err_sheet_lbl.grid()
-                return
-                
+            c += "# Automation Behavior\n"
+            c += "AUTO_SUBMIT=True\n"
+            c += "HEADLESS=False\n"
+            c += "STEALTH_MODE=True\n"
+            c += "MAX_RETRIES=3\n"
+            c += "SCREENSHOT_ON_SUCCESS=True\n"
+    
+            email = os.environ.get('JOBBOT_LAUNCHER_AUTH', '')
+            if email: c += "AUTHORIZED_EMAIL=" + email + "\n"
+            
+            err_sa_lbl.config(fg=error_color)
+            err_sheet_lbl.config(fg=error_color)
+            
+            err_sa_lbl.grid_remove()
+            err_sheet_lbl.grid_remove()
+            err_ollama_lbl.grid_remove()
+            has_errors = False
+            
+            # Check Ollama
+            import urllib.request
+            ollama_url = host_entry.get().strip()
             try:
-                spreadsheet = client.open_by_key(sid)
-                
-                # Auto-create worksheets if they don't exist
-                existing_titles = [ws.title for ws in spreadsheet.worksheets()]
-                
-                if "Sheet1" not in existing_titles:
-                    spreadsheet.add_worksheet(title="Sheet1", rows=1000, cols=20)
-                if "Sheet2" not in existing_titles:
-                    ws2 = spreadsheet.add_worksheet(title="Sheet2", rows=1000, cols=10)
-                    ws2.append_row(["Job Title", "Location"])
-                sheet = spreadsheet.worksheet("Sheet1")
+                req = urllib.request.Request(f"{ollama_url}/api/version")
+                with urllib.request.urlopen(req, timeout=3) as resp:
+                    if resp.status != 200:
+                        raise Exception("Status not 200")
             except Exception as e:
-                err_msg = str(e)
-                if "403" in err_msg or "permission" in err_msg.lower():
-                    err_msg = "The Service Account does not have Editor access to this Google Sheet."
-                err_sheet_lbl.config(text=f"Could not open sheet. {err_msg}")
-                err_sheet_lbl.grid()
-                return
-                
-            # Check write access
-            try:
-                val = sheet.acell('A1').value
-                sheet.update_acell('A1', val or "")
-                
-                btn_done.configure(state="normal", bg=success_color)
-                err_sheet_lbl.config(text="Verification successful! Everything looks great.", fg=success_color)
-                err_sheet_lbl.grid()
-            except Exception as e:
-                err_msg = str(e)
-                if "403" in err_msg or "permission" in err_msg.lower():
-                    err_msg = "The Service Account does not have Editor access to this Google Sheet."
-                err_sheet_lbl.config(text=f"Cannot write to sheet (read-only?): {err_msg}")
-                err_sheet_lbl.grid()
+                err_ollama_lbl.config(text=f"Ollama is not running or accessible at {ollama_url}.")
+                err_ollama_lbl.grid()
+                has_errors = True
+            
+            sa_content = sa_text.get("1.0", tk.END).strip()
+            if sa_content:
+                try:
+                    with open(os.path.join(CURRENT_DIR, "service_account.json"), "w", encoding="utf-8") as _f:
+                        _f.write(sa_content)
+                except Exception as e:
+                    err_sa_lbl.config(text=f"Could not save service_account.json: {e}")
+                    err_sa_lbl.grid()
+                    has_errors = True
                     
-        except Exception as e:
-            err_sheet_lbl.config(text=str(e))
-            err_sheet_lbl.grid()
+            if has_errors:
+                return
+                
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.write(c)
+                
+            setup_win.update()
             
-    tk.Button(f5, text="⟳ Save & Verify Settings", command=run_verify, bg=accent, fg="white", font=("Segoe UI", 12, "bold"), cursor="hand2", relief="flat", padx=20, pady=8).pack()
+            try:
+                import gspread
+                from google.oauth2.service_account import Credentials
+                sa_file = os.path.join(CURRENT_DIR, "service_account.json")
+                if not os.path.exists(sa_file):
+                    err_sa_lbl.config(text="service_account.json not found! Please upload it.")
+                    err_sa_lbl.grid()
+                    return
+                    
+                creds = Credentials.from_service_account_file(sa_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
+                client = gspread.authorize(creds)
+                
+                sid = sheet_entry.get().strip()
+                if not sid:
+                    err_sheet_lbl.config(text="Sheet ID is empty!")
+                    err_sheet_lbl.grid()
+                    return
+                    
+                try:
+                    spreadsheet = client.open_by_key(sid)
+                    
+                    # Auto-create worksheets if they don't exist
+                    existing_titles = [ws.title for ws in spreadsheet.worksheets()]
+                    
+                    if "Sheet1" not in existing_titles:
+                        spreadsheet.add_worksheet(title="Sheet1", rows=1000, cols=20)
+                    if "Sheet2" not in existing_titles:
+                        ws2 = spreadsheet.add_worksheet(title="Sheet2", rows=1000, cols=10)
+                        ws2.append_row(["Job Title", "Location"])
+                    sheet = spreadsheet.worksheet("Sheet1")
+                except Exception as e:
+                    err_msg = str(e)
+                    if "403" in err_msg or "permission" in err_msg.lower():
+                        err_msg = "The Service Account does not have Editor access to this Google Sheet."
+                    err_sheet_lbl.config(text=f"Could not open sheet. {err_msg}")
+                    err_sheet_lbl.grid()
+                    return
+                    
+                # Check write access
+                try:
+                    val = sheet.acell('A1').value
+                    sheet.update_acell('A1', val or "")
+                    
+                    btn_done.configure(state="normal", bg=success_color)
+                    err_sheet_lbl.config(text="Verification successful! Everything looks great.", fg=success_color)
+                    err_sheet_lbl.grid()
+                except Exception as e:
+                    err_msg = str(e)
+                    if "403" in err_msg or "permission" in err_msg.lower():
+                        err_msg = "The Service Account does not have Editor access to this Google Sheet."
+                    err_sheet_lbl.config(text=f"Cannot write to sheet (read-only?): {err_msg}")
+                    err_sheet_lbl.grid()
+                        
+            except Exception as e:
+                err_sheet_lbl.config(text=str(e))
+                err_sheet_lbl.grid()
+        finally:
+            btn_widget.configure(text="⟳ Save & Verify Settings", state="normal")
+            
+    btn_verify = tk.Button(f5, text="⟳ Save & Verify Settings", bg=accent, fg="white", font=("Segoe UI", 12, "bold"), cursor="hand2", relief="flat", padx=20, pady=8)
+    btn_verify.configure(command=lambda: run_verify(btn_verify))
+    btn_verify.pack()
     
     # Footer (Packed at the absolute bottom)
     footer_frame = tk.Frame(setup_win, bg="#121212")
@@ -2331,14 +2351,14 @@ def main():
 
     resume_panel = ResumeBotPanel(
         container, "Resume Bot", "Generate Resumes",
-        "ollama_generate.py", RESUMEBOT_DIR,
+        "ollama_generate.py", BASE_DIR if getattr(sys, 'frozen', False) else RESUMEBOT_DIR,
         log_file=os.path.join(LOGS_DIR, "resume_bot.log"),
     )
     resume_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
     cover_letter_panel = CoverLetterBotPanel(
         container, "Cover Letter Bot", "Generate Cover Letters",
-        "batch_generate.py", r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot",
+        "batch_generate.py", BASE_DIR if getattr(sys, 'frozen', False) else r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot",
         log_file=os.path.join(LOGS_DIR, "cover_letter_bot.log"),
     )
     cover_letter_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)

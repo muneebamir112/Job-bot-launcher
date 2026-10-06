@@ -3,65 +3,47 @@ import subprocess
 import shutil
 import sys
 
-def run_pyinstaller(script_path, is_windowed=False):
-    print(f"[*] Compiling {script_path}...")
-    
-    cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--noconfirm", "--clean", "--collect-all", "patchright", "--collect-all", "playwright"]
-    if is_windowed:
-        cmd.append("--windowed")
-        
-    cmd.append(script_path)
-    
-    work_dir = os.path.dirname(script_path)
-    script_name = os.path.basename(script_path)
-    
-    result = subprocess.run(cmd, cwd=work_dir)
-    if result.returncode != 0:
-        print(f"[!] Failed to compile {script_name}")
-        return False
-    return True
-
-def copy_exe_to_release(source_dir, script_name, dest_dir, rename_to=None):
-    exe_name = script_name.replace(".py", ".exe")
-    source_exe = os.path.join(source_dir, "dist", exe_name)
-    
-    if not os.path.exists(source_exe):
-        print(f"[!] Could not find compiled {exe_name} at {source_exe}")
-        return False
-        
-    os.makedirs(dest_dir, exist_ok=True)
-    
-    final_name = rename_to if rename_to else exe_name
-    dest_exe = os.path.join(dest_dir, final_name)
-    
-    shutil.copy2(source_exe, dest_exe)
-    print(f"[+] Successfully packaged: {final_name}")
-    return True
-
 def main():
     root_dir = r"D:\webncodes"
     release_dir = os.path.join(root_dir, "JobBot_Pro_Release")
+    launcher_dir = os.path.join(root_dir, "Job-bot-launcher")
     
     print("========================================")
     print(" Job Bot Professional Release Builder")
+    print("    (Monolith Entrypoint Edition)")
     print("========================================\n")
     
-    targets = [
-        (r"scraper\GlassD\glassdoor_scraper_final.py", False),
-        (r"scraper\Hiring_cafe\scraper.py", False),
-        (r"scraper\Jobgether\jobgether_scraper.py", False),
-        (r"resume-bot\fetch_jd.py", False),
-        (r"resume-bot\ollama_generate.py", False),
-        (r"cover_letter_bot\batch_generate.py", False),
-        (r"Job-bot-launcher\launcher.py", True)
+    # We compile ONLY jobbot_main.py. It acts as the router.
+    script_path = os.path.join(launcher_dir, "jobbot_main.py")
+    
+    cmd = [
+        sys.executable, "-m", "PyInstaller",
+        "--noconfirm", 
+        "--clean", 
+        "--collect-all", "patchright", 
+        "--collect-all", "playwright",
+        "--windowed", # Use windowed so the launcher UI doesn't have a console. Subprocesses might need fixing if they need console, but JobBot launcher redirects stdout/stderr.
+        # Add paths so PyInstaller can find the dynamically imported modules
+        "--paths", os.path.join(root_dir, "resume-bot"),
+        "--paths", os.path.join(root_dir, "cover_letter_bot"),
+        "--paths", os.path.join(root_dir, "scraper", "GlassD"),
+        "--paths", os.path.join(root_dir, "scraper", "Hiring_cafe"),
+        "--paths", os.path.join(root_dir, "scraper", "Jobgether"),
+        # Explicitly declare hidden imports because jobbot_main.py imports them conditionally
+        "--hidden-import", "fetch_jd",
+        "--hidden-import", "ollama_generate",
+        "--hidden-import", "batch_generate",
+        "--hidden-import", "glassdoor_scraper_final",
+        "--hidden-import", "scraper",  # Hiring_cafe
+        "--hidden-import", "jobgether_scraper",
+        script_path
     ]
     
-    for rel_path, is_win in targets:
-        full_path = os.path.join(root_dir, rel_path)
-        if not os.path.exists(full_path):
-            print(f"[!] Missing source file: {full_path}")
-            continue
-        run_pyinstaller(full_path, is_windowed=is_win)
+    print(f"[*] Compiling Monolith jobbot_main.exe...")
+    result = subprocess.run(cmd, cwd=launcher_dir)
+    if result.returncode != 0:
+        print(f"[!] Failed to compile jobbot_main.py")
+        sys.exit(1)
         
     print("\n[*] Compilation complete! Assembling release package...\n")
     
@@ -71,24 +53,33 @@ def main():
         
     os.makedirs(release_dir, exist_ok=True)
     
-    copy_exe_to_release(os.path.join(root_dir, "scraper", "GlassD"), "glassdoor_scraper_final.py", os.path.join(release_dir, "scraper", "GlassD"))
-    copy_exe_to_release(os.path.join(root_dir, "scraper", "Hiring_cafe"), "scraper.py", os.path.join(release_dir, "scraper", "Hiring_cafe"))
-    copy_exe_to_release(os.path.join(root_dir, "scraper", "Jobgether"), "jobgether_scraper.py", os.path.join(release_dir, "scraper", "Jobgether"))
+    # The output is in Job-bot-launcher/dist/jobbot_main
+    # Since we didn't pass --onefile, PyInstaller creates a directory with _internal.
+    # We will copy the entire dist/jobbot_main folder to JobBot_Pro_Release
+    source_dist = os.path.join(launcher_dir, "dist", "jobbot_main")
+    if not os.path.exists(source_dist):
+        print(f"[!] Could not find compiled output at {source_dist}")
+        sys.exit(1)
+        
+    # Copy the whole monolith folder (which contains _internal and jobbot_main.exe)
+    shutil.copytree(source_dist, release_dir, dirs_exist_ok=True)
     
-    copy_exe_to_release(os.path.join(root_dir, "resume-bot"), "fetch_jd.py", os.path.join(release_dir, "resume-bot"))
-    copy_exe_to_release(os.path.join(root_dir, "resume-bot"), "ollama_generate.py", os.path.join(release_dir, "resume-bot"))
+    # Rename jobbot_main.exe to jobbot.exe (or launcher.exe)
+    old_exe = os.path.join(release_dir, "jobbot_main.exe")
+    new_exe = os.path.join(release_dir, "jobbot.exe")
+    if os.path.exists(old_exe):
+        os.rename(old_exe, new_exe)
+        print("[+] Renamed jobbot_main.exe to jobbot.exe")
+        
+    # We also need to recreate the empty directories the bots expect
+    os.makedirs(os.path.join(release_dir, "CVs"), exist_ok=True)
+    os.makedirs(os.path.join(release_dir, "resume-bot", "profiles"), exist_ok=True)
     
-    copy_exe_to_release(os.path.join(root_dir, "cover_letter_bot"), "batch_generate.py", os.path.join(release_dir, "cover_letter_bot"))
-    
-    copy_exe_to_release(os.path.join(root_dir, "Job-bot-launcher"), "launcher.py", os.path.join(release_dir, "Job-bot-launcher"))
-    
-    
-    
-    print(f"\n[+] SUCCESS! Your highly secure, source-code-free release is ready at:")
+    print(f"\n[+] SUCCESS! Your highly optimized monolith release is ready at:")
     print(f"    {release_dir}")
     print("\nNext steps:")
     print("1. Distribute this folder to your clients.")
-    print("2. When they run launcher.exe, the Configuration Wizard will walk them through adding their Google Sheet and Service Account.")
+    print("2. When they run jobbot.exe launcher, the UI will open.")
 
 if __name__ == "__main__":
     main()
