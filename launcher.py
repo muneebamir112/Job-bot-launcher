@@ -507,6 +507,7 @@ class ResumeBotPanel(BotPanel):
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.edit_kw_btn.pack_forget()
         self._stop_requested = False
         self._thread = None
         self._current_proc = None
@@ -569,8 +570,8 @@ class ResumeBotPanel(BotPanel):
                         
                     # Save to profiles directories
                     import shutil
-                    dest1 = os.path.join(JOBBOT_DIR, "profiles", f"{prof_name}.json")
-                    dest2 = os.path.join(RESUMEBOT_DIR, "profiles", f"{prof_name}.json")
+                    dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
+                    dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
                     
                     os.makedirs(os.path.dirname(dest1), exist_ok=True)
                     os.makedirs(os.path.dirname(dest2), exist_ok=True)
@@ -939,6 +940,7 @@ class ResumeBotPanel(BotPanel):
 class CoverLetterBotPanel(BotPanel):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.edit_kw_btn.pack_forget()
         self._stop_requested = False
         self._thread = None
         self._current_proc = None
@@ -1001,8 +1003,8 @@ class CoverLetterBotPanel(BotPanel):
                         
                     # Save to profiles directories
                     import shutil
-                    dest1 = os.path.join(JOBBOT_DIR, "profiles", f"{prof_name}.json")
-                    dest2 = os.path.join(RESUMEBOT_DIR, "profiles", f"{prof_name}.json")
+                    dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
+                    dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
                     
                     os.makedirs(os.path.dirname(dest1), exist_ok=True)
                     os.makedirs(os.path.dirname(dest2), exist_ok=True)
@@ -1154,9 +1156,12 @@ class CoverLetterBotPanel(BotPanel):
 
     def _run_subprocess(self, cmd):
         try:
+            env = os.environ.copy()
+            env["PYTHONUNBUFFERED"] = "1"
+            env["JOBBOT_LAUNCHER_AUTH"] = "1"
             self._current_proc = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                creationflags=0x08000000)
+                env=env, cwd=self.cwd, creationflags=0x08000000)
             for line in iter(self._current_proc.stdout.readline, ""):
                 if self._stop_requested:
                     self._current_proc.terminate()
@@ -1228,20 +1233,16 @@ class CoverLetterBotPanel(BotPanel):
                 
                 # Run fetch_jd from ResumeBot dir
                 cwd_resumebot = RESUMEBOT_DIR
-                self._current_proc = subprocess.Popen(
-                    [sys.executable, "-u", "fetch_jd.py", link, company],
-                    cwd=self.cwd_resumebot,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    creationflags=0x08000000,
-                    env=os.environ.copy())
-                for line in iter(self._current_proc.stdout.readline, ""):
-                    if self._stop_requested:
-                        self._current_proc.terminate()
-                        break
-                    self._append_log(line)
-                self._current_proc.wait()
-                code = self._current_proc.returncode
+                cmd_fetch = self._get_cmd("fetch_jd.py", link, company)
+                
+                # temporarily override cwd for fetch
+                old_cwd = self.cwd
+                self.cwd = cwd_resumebot
+                code = self._run_subprocess(cmd_fetch)
+                self.cwd = old_cwd
 
+                if code is None:
+                    break
                 if code != 0:
                     self._append_log(f"  Fetch failed for {company}, skipping cover letter generation.\n")
                     failed += 1
@@ -1251,20 +1252,13 @@ class CoverLetterBotPanel(BotPanel):
                 self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\"\n\n")
                 
                 # Run batch_generate from cover_letter_bot dir
-                cwd_clbot = r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot"
-                self._current_proc = subprocess.Popen(
-                    [sys.executable, "-u", "batch_generate.py", jd_path, company, profile_name],
-                    cwd=self.cwd_clbot,
-                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                    creationflags=0x08000000,
-                    env=os.environ.copy())
-                for line in iter(self._current_proc.stdout.readline, ""):
-                    if self._stop_requested:
-                        self._current_proc.terminate()
-                        break
-                    self._append_log(line)
-                self._current_proc.wait()
-                code = self._current_proc.returncode
+                cwd_clbot = os.path.join(BASE_DIR, "cover_letter_bot")
+                cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name)
+                
+                old_cwd = self.cwd
+                self.cwd = cwd_clbot
+                code = self._run_subprocess(cmd_batch)
+                self.cwd = old_cwd
 
                 if code != 0:
                     self._append_log(f"  Failed to generate a cover letter for {company} ({profile_name}).\n")
@@ -1877,6 +1871,9 @@ def check_prerequisites(root):
     tk.Button(f1, text="Browse & Upload .json", command=upload_sa, bg="#333333", fg=fg_color, font=("Segoe UI", 10), cursor="hand2", relief="flat", padx=15, pady=4).grid(row=2, column=1, sticky="w", padx=10)
     
     tk.Label(f1, text="?? How to get it: Google Cloud Console > IAM & Admin > Service Accounts > Create Key (JSON)", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=4, column=0, columnspan=3, sticky="w", padx=20, pady=(15, 20))
+    err_sa_lbl = tk.Label(f1, text="", fg=error_color, bg=panel_bg, font=("Segoe UI", 10, "bold"))
+    err_sa_lbl.grid(row=5, column=0, columnspan=3, sticky="w", padx=20, pady=0)
+    err_sa_lbl.grid_remove()
     
     # Section 2
     f2 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
@@ -1914,6 +1911,9 @@ def check_prerequisites(root):
     
     tk.Label(f2, text="ℹ️ Look at your sheet URL: docs.google.com/spreadsheets/d/[THIS_IS_THE_ID]/edit", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(5, 5))
     tk.Label(f2, text="⚠️ CRITICAL: You must share your sheet with the Service Account email as an Editor!", bg=panel_bg, fg="#FFB900", font=("Segoe UI", 9, "bold")).grid(row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 20))
+    err_sheet_lbl = tk.Label(f2, text="", fg=error_color, bg=panel_bg, font=("Segoe UI", 10, "bold"))
+    err_sheet_lbl.grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=0)
+    err_sheet_lbl.grid_remove()
     
 
     # Section 2.5: Email Verification
@@ -1950,6 +1950,9 @@ def check_prerequisites(root):
     host_entry.insert(0, env_dict.get("OLLAMA_HOST", "http://localhost:11434"))
     
     tk.Label(input_frame, text="ℹ️ By default, Ollama runs on http://localhost:11434. If running remotely, use its IP address.", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
+    err_ollama_lbl = tk.Label(input_frame, text="", fg=error_color, bg=panel_bg, font=("Segoe UI", 10, "bold"))
+    err_ollama_lbl.grid(row=3, column=0, columnspan=2, sticky="w", pady=(5, 0))
+    err_ollama_lbl.grid_remove()
     
     # Section 4 - Verification
     f5 = tk.Frame(frame, bg=bg_color)
@@ -1974,8 +1977,26 @@ def check_prerequisites(root):
         email = os.environ.get('JOBBOT_LAUNCHER_AUTH', '')
         if email: c += "AUTHORIZED_EMAIL=" + email + "\n"
         
-        verify_log.delete("1.0", tk.END)
-        verify_log.insert(tk.END, "[*] Saving configuration...\n")
+        err_sa_lbl.config(fg=error_color)
+        err_sheet_lbl.config(fg=error_color)
+        
+        err_sa_lbl.grid_remove()
+        err_sheet_lbl.grid_remove()
+        err_ollama_lbl.grid_remove()
+        has_errors = False
+        
+        # Check Ollama
+        import urllib.request
+        ollama_url = host_entry.get().strip()
+        try:
+            req = urllib.request.Request(f"{ollama_url}/api/version")
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status != 200:
+                    raise Exception("Status not 200")
+        except Exception as e:
+            err_ollama_lbl.config(text=f"Ollama is not running or accessible at {ollama_url}.")
+            err_ollama_lbl.grid()
+            has_errors = True
         
         sa_content = sa_text.get("1.0", tk.END).strip()
         if sa_content:
@@ -1983,8 +2004,13 @@ def check_prerequisites(root):
                 with open(os.path.join(CURRENT_DIR, "service_account.json"), "w", encoding="utf-8") as _f:
                     _f.write(sa_content)
             except Exception as e:
-                verify_log.insert(tk.END, f"[!] FAIL: Could not save service_account.json: {e}\n")
-                return
+                err_sa_lbl.config(text=f"Could not save service_account.json: {e}")
+                err_sa_lbl.grid()
+                has_errors = True
+                
+        if has_errors:
+            return
+            
         with open(env_path, "w", encoding="utf-8") as f:
             f.write(c)
             
@@ -1996,8 +2022,6 @@ def check_prerequisites(root):
             if os.path.exists(SERVICE_ACCOUNT_FILE):
                 shutil.copy2(SERVICE_ACCOUNT_FILE, os.path.join(d, "service_account.json"))
             
-        verify_log.delete("1.0", tk.END)
-        verify_log.insert(tk.END, "[*] Settings saved to .env!\\n[*] Verifying Google Sheets connection...\\n")
         setup_win.update()
         
         try:
@@ -2005,7 +2029,8 @@ def check_prerequisites(root):
             from google.oauth2.service_account import Credentials
             sa_file = os.path.join(CURRENT_DIR, "service_account.json")
             if not os.path.exists(sa_file):
-                verify_log.insert(tk.END, "[!] FAIL: service_account.json not found! Please upload it.\\n")
+                err_sa_lbl.config(text="service_account.json not found! Please upload it.")
+                err_sa_lbl.grid()
                 return
                 
             creds = Credentials.from_service_account_file(sa_file, scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"])
@@ -2013,7 +2038,8 @@ def check_prerequisites(root):
             
             sid = sheet_entry.get().strip()
             if not sid:
-                verify_log.insert(tk.END, "[!] FAIL: Sheet ID is empty!\\n")
+                err_sheet_lbl.config(text="Sheet ID is empty!")
+                err_sheet_lbl.grid()
                 return
                 
             try:
@@ -2023,36 +2049,39 @@ def check_prerequisites(root):
                 existing_titles = [ws.title for ws in spreadsheet.worksheets()]
                 
                 if "Sheet1" not in existing_titles:
-                    verify_log.insert(tk.END, "[*] Sheet1 missing. Creating it...\n")
                     spreadsheet.add_worksheet(title="Sheet1", rows=1000, cols=20)
                 if "Sheet2" not in existing_titles:
-                    verify_log.insert(tk.END, "[*] Sheet2 missing. Creating it...\n")
                     ws2 = spreadsheet.add_worksheet(title="Sheet2", rows=1000, cols=10)
                     ws2.append_row(["Job Title", "Location"])
                 sheet = spreadsheet.worksheet("Sheet1")
             except Exception as e:
-                verify_log.insert(tk.END, "[!] FAIL: Could not open sheet.\\nMake sure you shared the sheet with your Service Account email!\\nError: " + str(e) + "\\n")
+                err_msg = str(e)
+                if "403" in err_msg or "permission" in err_msg.lower():
+                    err_msg = "The Service Account does not have Editor access to this Google Sheet."
+                err_sheet_lbl.config(text=f"Could not open sheet. {err_msg}")
+                err_sheet_lbl.grid()
                 return
-                
-            else:
-                verify_log.insert(tk.END, "[+] SUCCESS: Required headers are present.\\n")
                 
             # Check write access
             try:
                 val = sheet.acell('A1').value
                 sheet.update_acell('A1', val or "")
-                verify_log.insert(tk.END, "[+] SUCCESS: Write access verified! Everything looks great.\\n")
+                
                 btn_done.configure(state="normal", bg=success_color)
+                err_sheet_lbl.config(text="Verification successful! Everything looks great.", fg=success_color)
+                err_sheet_lbl.grid()
             except Exception as e:
-                verify_log.insert(tk.END, "[!] FAIL: Cannot write to sheet (read-only?): " + str(e) + "\\n")
+                err_msg = str(e)
+                if "403" in err_msg or "permission" in err_msg.lower():
+                    err_msg = "The Service Account does not have Editor access to this Google Sheet."
+                err_sheet_lbl.config(text=f"Cannot write to sheet (read-only?): {err_msg}")
+                err_sheet_lbl.grid()
                     
         except Exception as e:
-            verify_log.insert(tk.END, "[!] FAIL: " + str(e) + "\\n")
+            err_sheet_lbl.config(text=str(e))
+            err_sheet_lbl.grid()
             
     tk.Button(f5, text="⟳ Save & Verify Settings", command=run_verify, bg=accent, fg="white", font=("Segoe UI", 12, "bold"), cursor="hand2", relief="flat", padx=20, pady=8).pack()
-    
-    verify_log = tk.Text(f5, height=8, width=80, bg="#000000", fg="#00FF00", font=("Consolas", 10), relief="flat")
-    verify_log.pack(pady=20)
     
     # Footer (Packed at the absolute bottom)
     footer_frame = tk.Frame(setup_win, bg="#121212")

@@ -6,7 +6,7 @@ import sys
 def run_pyinstaller(script_path, is_windowed=False):
     print(f"[*] Compiling {script_path}...")
     
-    cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--noconfirm", "--collect-all", "patchright"]
+    cmd = [sys.executable, "-m", "PyInstaller", "--onefile", "--noconfirm", "--clean", "--collect-all", "patchright", "--collect-all", "playwright"]
     if is_windowed:
         cmd.append("--windowed")
         
@@ -15,9 +15,9 @@ def run_pyinstaller(script_path, is_windowed=False):
     work_dir = os.path.dirname(script_path)
     script_name = os.path.basename(script_path)
     
-    result = subprocess.run(cmd, cwd=work_dir, capture_output=True, text=True)
+    result = subprocess.run(cmd, cwd=work_dir)
     if result.returncode != 0:
-        print(f"[!] Failed to compile {script_name}:\n{result.stderr}")
+        print(f"[!] Failed to compile {script_name}")
         return False
     return True
 
@@ -52,6 +52,7 @@ def main():
         (r"scraper\Jobgether\jobgether_scraper.py", False),
         (r"resume-bot\fetch_jd.py", False),
         (r"resume-bot\ollama_generate.py", False),
+        (r"cover_letter_bot\batch_generate.py", False),
         (r"Job-bot-launcher\launcher.py", True)
     ]
     
@@ -66,7 +67,7 @@ def main():
     
     if os.path.exists(release_dir):
         print(f"[*] Cleaning old release directory: {release_dir}")
-        shutil.rmtree(release_dir)
+        shutil.rmtree(release_dir, ignore_errors=True)
         
     os.makedirs(release_dir, exist_ok=True)
     
@@ -76,6 +77,8 @@ def main():
     
     copy_exe_to_release(os.path.join(root_dir, "resume-bot"), "fetch_jd.py", os.path.join(release_dir, "resume-bot"))
     copy_exe_to_release(os.path.join(root_dir, "resume-bot"), "ollama_generate.py", os.path.join(release_dir, "resume-bot"))
+    
+    copy_exe_to_release(os.path.join(root_dir, "cover_letter_bot"), "batch_generate.py", os.path.join(release_dir, "cover_letter_bot"))
     
     copy_exe_to_release(os.path.join(root_dir, "Job-bot-launcher"), "launcher.py", os.path.join(release_dir, "Job-bot-launcher"))
     
