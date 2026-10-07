@@ -346,8 +346,14 @@ class BotPanel(tk.Frame):
         if self._log_dir and self._log_fh is not None:
             elapsed = format_duration(datetime.now() - self._run_start) if self._run_start else "?"
             self._append_log(f"\n=== {self.title}: {end_label} (total time: {elapsed}) ===\n")
+            log_path = self._log_fh.name
             self._log_fh.close()
             self._log_fh = None
+            try:
+                import log_to_html
+                log_to_html.convert_to_html(log_path)
+            except Exception as e:
+                print(f"Failed to generate HTML log: {e}")
 
     def _poll_queue(self):
         try:
@@ -955,9 +961,10 @@ class ResumeBotPanel(BotPanel):
                     failed += 1
                     continue
 
+                model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
                 self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
-                self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\"\n\n")
-                code = self._run_subprocess(self._get_cmd("ollama_generate.py", jd_filename, company, profile_name))
+                self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\" \"{model_name}\"\n\n")
+                code = self._run_subprocess(self._get_cmd("ollama_generate.py", jd_filename, company, profile_name, model_name))
                 if code is None:
                     break
                 if code != 0:
@@ -1212,12 +1219,13 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         failed += 1
                         continue
 
+                    model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
                     self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
-                    self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\"\n\n")
+                    self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\" \"{model_name}\"\n\n")
                 
                     # Run batch_generate from cover_letter_bot dir
                     cwd_clbot = BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "cover_letter_bot")
-                    cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name)
+                    cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name, model_name)
                 
                     old_cwd = self.cwd
                     self.cwd = cwd_clbot
@@ -1482,15 +1490,34 @@ class ScraperPanel(tk.Frame):
             self._log_fh = None
             platform_fhs = self._platform_log_fhs
             self._platform_log_fhs = {}
+            
+        try:
+            import log_to_html
+        except Exception:
+            log_to_html = None
+
         if fh is not None:
+            log_path = fh.name
             fh.close()
+            if log_to_html:
+                try:
+                    log_to_html.convert_to_html(log_path)
+                except Exception:
+                    pass
+
         for label, pfh in platform_fhs.items():
             try:
                 pfh.write(stamp_log_line(f"=== {label}: {end_label} (total time: {elapsed}) ===\n"))
                 pfh.flush()
             except Exception:
                 pass
+            p_log_path = pfh.name
             pfh.close()
+            if log_to_html:
+                try:
+                    log_to_html.convert_to_html(p_log_path)
+                except Exception:
+                    pass
 
     def _log_platform(self, label, text):
         """Log a line that belongs to one specific platform's subprocess -
