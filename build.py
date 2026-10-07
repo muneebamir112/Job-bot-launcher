@@ -75,6 +75,12 @@ def main():
     os.makedirs(os.path.join(release_dir, "CVs"), exist_ok=True)
     os.makedirs(os.path.join(release_dir, "resume-bot", "profiles"), exist_ok=True)
     
+    # Copy the Glassdoor profile so the user stays logged in
+    glassdoor_profiles_src = os.path.join(root_dir, "scraper", "GlassD", "profiles")
+    if os.path.exists(glassdoor_profiles_src):
+        shutil.copytree(glassdoor_profiles_src, os.path.join(release_dir, "profiles"), dirs_exist_ok=True)
+        print("[+] Copied Glassdoor browser profile to release")
+    
     print(f"\n[+] SUCCESS! Your highly optimized monolith release is ready at:")
     print(f"    {release_dir}")
     print("\nNext steps:")

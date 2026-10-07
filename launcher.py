@@ -510,6 +510,7 @@ class ResumeBotPanel(BotPanel):
         self._stop_requested = False
         self._thread = None
         self._current_proc = None
+        self.after(500, self._check_button_state)
 
     def build_inputs(self, parent):
         tk.Label(
@@ -522,15 +523,20 @@ class ResumeBotPanel(BotPanel):
         profile_frame.pack(fill="x", pady=5)
         
         tk.Label(profile_frame, text="Number of Profiles to Process:", font=("Segoe UI", 10, "bold"), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
-        self.num_profiles_var = tk.IntVar(value=1)
-        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10, "bold"), buttonbackground=COLORS["panel_bg"])
+        self.num_profiles_var = tk.StringVar(value="1")
+        vcmd = (self.register(lambda P: P.isdigit() or P == ""), '%P')
+        self.profile_spinbox = ttk.Spinbox(profile_frame, from_=1, to=9999, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10, "bold"), validate="key", validatecommand=vcmd)
         self.profile_spinbox.pack(side="left", padx=5)
         
         self.active_profiles = []
         
         # Add a shiny button to upload new profile JSONs dynamically!
         def _add_profiles():
-            req_count = self.num_profiles_var.get()
+            try:
+                req_count = int(self.num_profiles_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter a valid number.")
+                return
             filepaths = filedialog.askopenfilenames(
                 title=f"Select {req_count} Profile JSON(s)",
                 filetypes=[("JSON Files", "*.json")]
@@ -655,7 +661,29 @@ class ResumeBotPanel(BotPanel):
         single-shot self.process that on_close() otherwise expects."""
         self.stop()
 
+
+    def _check_button_state(self):
+        try:
+            val_str = str(self.num_profiles_var.get())
+            num = int(val_str)
+            
+            # Disable if uploaded profiles don't match the required count
+            if len(self.active_profiles) != num:
+                valid = False
+            else:
+                valid = True
+        except Exception:
+            valid = False
+            
+        if valid and not self.is_running():
+            self.start_btn.configure(state="normal")
+        else:
+            self.start_btn.configure(state="disabled")
+            
+        self.after(200, self._check_button_state)
+
     def _finish(self):
+
         def _do():
             self.status_label.configure(text="Idle", fg=COLORS["idle"])
             self.start_btn.configure(state="normal")
@@ -806,7 +834,10 @@ class ResumeBotPanel(BotPanel):
                     self._finish()
                     return
 
-            num_profiles = self.num_profiles_var.get()
+            try:
+                num_profiles = int(self.num_profiles_var.get())
+            except ValueError:
+                num_profiles = 1
             if hasattr(self, 'active_profiles') and self.active_profiles:
                 profile_names = self.active_profiles
             else:
@@ -951,14 +982,7 @@ class ResumeBotPanel(BotPanel):
         self._finish()
 
 
-class CoverLetterBotPanel(BotPanel):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.edit_kw_btn.pack_forget()
-        self._stop_requested = False
-        self._thread = None
-        self._current_proc = None
-
+class CoverLetterBotPanel(ResumeBotPanel):
     def build_inputs(self, parent):
         tk.Label(
             parent,
@@ -970,15 +994,20 @@ class CoverLetterBotPanel(BotPanel):
         profile_frame.pack(fill="x", pady=5)
         
         tk.Label(profile_frame, text="Number of Profiles to Process:", font=("Segoe UI", 10, "bold"), fg=COLORS["text"], bg=COLORS["panel_bg"]).pack(side="left", padx=5)
-        self.num_profiles_var = tk.IntVar(value=1)
-        self.profile_spinbox = tk.Spinbox(profile_frame, from_=1, to=10, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10, "bold"), buttonbackground=COLORS["panel_bg"])
+        self.num_profiles_var = tk.StringVar(value="1")
+        vcmd = (self.register(lambda P: P.isdigit() or P == ""), '%P')
+        self.profile_spinbox = ttk.Spinbox(profile_frame, from_=1, to=9999, textvariable=self.num_profiles_var, width=5, font=("Segoe UI", 10, "bold"), validate="key", validatecommand=vcmd)
         self.profile_spinbox.pack(side="left", padx=5)
         
         self.active_profiles = []
         
         # Add a shiny button to upload new profile JSONs dynamically!
         def _add_profiles():
-            req_count = self.num_profiles_var.get()
+            try:
+                req_count = int(self.num_profiles_var.get())
+            except ValueError:
+                messagebox.showerror("Invalid Input", "Please enter a valid number.")
+                return
             filepaths = filedialog.askopenfilenames(
                 title=f"Select {req_count} Profile JSON(s)",
                 filetypes=[("JSON Files", "*.json")]
@@ -1072,9 +1101,6 @@ class CoverLetterBotPanel(BotPanel):
         self.target_profiles_lbl = tk.Label(parent, text="Target Profiles: Default (First N in Sheet)", font=("Segoe UI", 8, "italic"), fg=COLORS["muted"], bg=COLORS["panel_bg"])
         self.target_profiles_lbl.pack(anchor="w", padx=5, pady=(0, 5))
 
-    def is_running(self):
-        return self._thread is not None and self._thread.is_alive()
-
     def start(self, continuous=False):
         if self.is_running():
             return
@@ -1087,225 +1113,120 @@ class CoverLetterBotPanel(BotPanel):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop(self):
-        self._stop_requested = True
-        self._append_log("\n--- Stopping... ---\n")
-        if self._current_proc is not None:
-            try:
-                self._current_proc.terminate()
-            except Exception:
-                pass
-
-    def terminate_now(self):
-        self.stop()
-
-    def _finish(self):
-        def _do():
-            self.status_label.configure(text="Idle", fg=COLORS["idle"])
-            self.start_btn.configure(state="normal")
-            self.stop_btn.configure(state="disabled")
-        self.after(0, _do)
-
-    def _append_log(self, text):
-        file_only = False
-        if "[FILE_ONLY]" in text:
-            file_only = True
-            text = text.replace("[FILE_ONLY]", "")
-            
-        if not file_only:
-            def _do():
-                self.log_box.configure(state="normal")
-                self.log_box.insert("end", text)
-                self.log_box.see("end")
-                self.log_box.configure(state="disabled")
-            self.after(0, _do)
-            
-        if self._log_fh:
-            stamped_text = stamp_log_line(text)
-            self._log_fh.write(stamped_text)
-            self._log_fh.flush()
-
-    def _set_status(self, text):
-        self.after(0, lambda: self.status_label.configure(text=text, fg=COLORS["running"]))
-
-    def _get_cmd(self, script_name, *args):
-        exe_name = script_name.replace(".py", ".exe")
-        if os.path.exists(os.path.join(self.cwd, exe_name)):
-            cmd = [os.path.join(self.cwd, exe_name)]
-        else:
-            cmd = [sys.executable, "-u", script_name]
-        cmd.extend(args)
-        return cmd
-
-    @staticmethod
-    def _slugify(text):
-        text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
-        return text[:60] or "job"
-
-    # We will write 'Cover Letter Generated' instead of 'Generated' maybe?
-    # Actually, the user asked if checking if PDF exists is enough, they didn't answer about the sheet column.
-    # So we'll just check if PDF exists. We won't write to the sheet.
-
-    def _connect_sheet(self):
-        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
-        creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=scopes)
-        client = gspread.authorize(creds)
-        spreadsheet = client.open_by_key(GOOGLE_SHEET_ID)
-        try:
-            return spreadsheet.worksheet("Jobs")
-        except:
-            return spreadsheet.sheet1
-
-    def _fetch_jobs(self, ws):
-        rows = ws.get_all_values()[1:]  # skip header row
-        jobs = []
-        for i, r in enumerate(rows, start=2):  # row 2 is the first data row
-            if len(r) < 6:
-                continue
-            company, link = r[1].strip(), r[5].strip()
-            if company and link:
-                jobs.append((company, link, i, r))
-        return jobs
-
-    def _sleep_unless_stopped(self, seconds):
-        for _ in range(int(seconds * 10)):
-            if self._stop_requested:
-                return True
-            time.sleep(0.1)
-        return False
-
-    def _run_subprocess(self, cmd):
-        try:
-            env = os.environ.copy()
-            env["PYTHONUNBUFFERED"] = "1"
-            env["JOBBOT_LAUNCHER_AUTH"] = "1"
-            self._current_proc = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                env=env, cwd=self.cwd, creationflags=0x08000000)
-            for line in iter(self._current_proc.stdout.readline, ""):
-                if self._stop_requested:
-                    self._current_proc.terminate()
-                    break
-                self._append_log(line)
-            
-            self._current_proc.stdout.close()
-            self._current_proc.wait()
-            ret = self._current_proc.returncode
-            self._current_proc = None
-            return ret
-        except Exception as e:
-            self._append_log(f"  Error launching subprocess: {e}\n")
-            return -1
-
     def _run(self):
         self._current_proc = None
-        while True:
-            if self._stop_requested:
-                break
-
-            self._set_status("Connecting to Google Sheets...")
-            try:
-                sheet = self._connect_sheet()
-                headers = sheet.get_all_values()[0]
-                jobs = self._fetch_jobs(sheet)
-            except Exception as e:
-                self._append_log(f"Failed to fetch job links: {e}\nRetrying in 15s...\n")
-                if self._sleep_unless_stopped(15):
-                    break
-                continue
-
-            selected_prof = getattr(self, "selected_profile_var", None)
-            chosen = selected_prof.get().strip() if selected_prof else "All Profiles"
-            if chosen and chosen != "All Profiles":
-                profile_names = [chosen]
-                num_profiles = 1
-            else:
-                num_profiles = self.num_profiles_var.get()
-                profile_names = headers[8:8+num_profiles]
-
-            todo = []
-            COVERLETTER_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "CVs")
-            for company, link, row, row_data in jobs:
-                for profile_name in profile_names:
-                    # Don't check the Google sheet for cover letter status, just check the file!
-                    pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
-                    if not os.path.exists(pdf_path):
-                        todo.append((company, link, row, profile_name))
-
-            if todo:
-                self._append_log(
-                    f"Loaded {len(jobs)} job(s) with a link from the sheet — "
-                    f"Queued {len(todo)} cover letter generation(s) across {num_profiles} profile(s)\n"
-                )
-
-            made = failed = 0
-            for idx, (company, link, row, profile_name) in enumerate(todo, start=1):
+        try:
+            while True:
                 if self._stop_requested:
                     break
 
-                self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
-
-                jd_filename = f"jd_{self._slugify(company)}.txt"
-                jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
-
-                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
-                self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
-                
-                # Run fetch_jd from ResumeBot dir
-                cwd_resumebot = BASE_DIR if getattr(sys, 'frozen', False) else RESUMEBOT_DIR
-                cmd_fetch = self._get_cmd("fetch_jd.py", link, company)
-                
-                # temporarily override cwd for fetch
-                old_cwd = self.cwd
-                self.cwd = cwd_resumebot
-                code = self._run_subprocess(cmd_fetch)
-                self.cwd = old_cwd
-
-                if code is None:
-                    break
-                if code != 0:
-                    self._append_log(f"  Fetch failed for {company}, skipping cover letter generation.\n")
-                    failed += 1
+                self._set_status("Connecting to Google Sheets...")
+                try:
+                    sheet = self._connect_sheet()
+                    headers = sheet.get_all_values()[0]
+                    jobs = self._fetch_jobs(sheet)
+                except Exception as e:
+                    self._append_log(f"Failed to fetch job links: {e}\nRetrying in 15s...\n")
+                    if self._sleep_unless_stopped(15):
+                        break
                     continue
 
-                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
-                self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\"\n\n")
-                
-                # Run batch_generate from cover_letter_bot dir
-                cwd_clbot = BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "cover_letter_bot")
-                cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name)
-                
-                old_cwd = self.cwd
-                self.cwd = cwd_clbot
-                code = self._run_subprocess(cmd_batch)
-                self.cwd = old_cwd
-
-                if code != 0:
-                    self._append_log(f"  Failed to generate a cover letter for {company} ({profile_name}).\n")
-                    failed += 1
+                selected_prof = getattr(self, "selected_profile_var", None)
+                chosen = selected_prof.get().strip() if selected_prof else "All Profiles"
+                if chosen and chosen != "All Profiles":
+                    profile_names = [chosen]
+                    num_profiles = 1
                 else:
-                    made += 1
-                    
-                # Clean up the JD text file regardless of success or failure
-                try:
-                    if os.path.exists(jd_path):
-                        os.remove(jd_path)
-                except OSError as e:
-                    self._append_log(f"  Could not clean up {jd_filename}: {e}\n")
+                    try:
+                        num_profiles = int(self.num_profiles_var.get())
+                    except ValueError:
+                        num_profiles = 1
+                    profile_names = headers[8:8+num_profiles]
 
-            if todo:
-                self._append_log(f"\n{made} cover letter(s) generated, {failed} skipped/failed\n")
-            
-            if not self.continuous_mode or self._stop_requested:
-                break
+                todo = []
+                COVERLETTER_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
+                for company, link, row, row_data in jobs:
+                    for profile_name in profile_names:
+                        # Don't check the Google sheet for cover letter status, just check the file!
+                        pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
+                        if not os.path.exists(pdf_path):
+                            todo.append((company, link, row, profile_name))
+
+                if todo:
+                    self._append_log(
+                        f"Loaded {len(jobs)} job(s) with a link from the sheet — "
+                        f"Queued {len(todo)} cover letter generation(s) across {num_profiles} profile(s)\n"
+                    )
+
+                made = failed = 0
+                for idx, (company, link, row, profile_name) in enumerate(todo, start=1):
+                    if self._stop_requested:
+                        break
+
+                    self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
+
+                    jd_filename = f"jd_{self._slugify(company)}.txt"
+                    jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
+
+                    self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
+                    self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
                 
-            self._set_status("Waiting for new jobs...")
-            if self._sleep_unless_stopped(30):
-                break
+                    # Run fetch_jd from ResumeBot dir
+                    cwd_resumebot = BASE_DIR if getattr(sys, 'frozen', False) else RESUMEBOT_DIR
+                    cmd_fetch = self._get_cmd("fetch_jd.py", link, company)
+                
+                    # temporarily override cwd for fetch
+                    old_cwd = self.cwd
+                    self.cwd = cwd_resumebot
+                    code = self._run_subprocess(cmd_fetch)
+                    self.cwd = old_cwd
 
-        end_label = "stopped" if self._stop_requested else "finished"
-        self._append_log(f"\n=== Generate Cover Letters: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
-        self._finish()
+                    if code is None:
+                        break
+                    if code != 0:
+                        self._append_log(f"  Fetch failed for {company}, skipping cover letter generation.\n")
+                        failed += 1
+                        continue
+
+                    self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
+                    self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\"\n\n")
+                
+                    # Run batch_generate from cover_letter_bot dir
+                    cwd_clbot = BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "cover_letter_bot")
+                    cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name)
+                
+                    old_cwd = self.cwd
+                    self.cwd = cwd_clbot
+                    code = self._run_subprocess(cmd_batch)
+                    self.cwd = old_cwd
+
+                    if code != 0:
+                        self._append_log(f"  Failed to generate a cover letter for {company} ({profile_name}).\n")
+                        failed += 1
+                    else:
+                        made += 1
+                    
+                    # Clean up the JD text file regardless of success or failure
+                    try:
+                        if os.path.exists(jd_path):
+                            os.remove(jd_path)
+                    except OSError as e:
+                        self._append_log(f"  Could not clean up {jd_filename}: {e}\n")
+
+                if todo:
+                    self._append_log(f"\n{made} cover letter(s) generated, {failed} skipped/failed\n")
+            
+                if not self.continuous_mode or self._stop_requested:
+                    break
+                
+                self._set_status("Waiting for new jobs...")
+                if self._sleep_unless_stopped(30):
+                    break
+
+        finally:
+            end_label = "stopped" if self._stop_requested else "finished"
+            self._append_log(f"\n=== Generate Cover Letters: {end_label} at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} ===\n")
+            self._finish()
 
 
 
@@ -1569,7 +1490,29 @@ class ScraperPanel(tk.Frame):
     def _set_status(self, text, color):
         self.after(0, lambda: self.status_label.configure(text=text, fg=color))
 
+
+    def _check_button_state(self):
+        try:
+            val_str = str(self.num_profiles_var.get())
+            num = int(val_str)
+            
+            # Disable if uploaded profiles don't match the required count
+            if len(self.active_profiles) != num:
+                valid = False
+            else:
+                valid = True
+        except Exception:
+            valid = False
+            
+        if valid and not self.is_running():
+            self.start_btn.configure(state="normal")
+        else:
+            self.start_btn.configure(state="disabled")
+            
+        self.after(200, self._check_button_state)
+
     def _finish(self):
+
         def _do():
             self.status_label.configure(text="Idle", fg=COLORS["idle"])
             self.start_btn.configure(state="normal")
@@ -1927,6 +1870,23 @@ def check_prerequisites(root):
             resume_path_var.set(folder)
             
     tk.Button(f3, text="Browse...", command=browse_path, font=("Segoe UI", 10, "bold"), bg="#555", fg="white", relief="flat", cursor="hand2").grid(row=2, column=1, padx=(0, 20), pady=5, sticky="ew")
+    
+    # 3b. Cover Letter Save Folder
+    tk.Label(f3, text="Output Folder for Cover Letters", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f3, text="Where should your customized PDF cover letters be saved?", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 10)).grid(row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
+    
+    cl_path_var = tk.StringVar(value=os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "CVs")))
+    
+    cl_path_entry = tk.Entry(f3, textvariable=cl_path_var, width=50, bg="#121212", fg="#FFFFFF", insertbackground="#FFFFFF", font=("Consolas", 11), relief="flat")
+    cl_path_entry.grid(row=5, column=0, sticky="ew", padx=(20, 5), pady=5, ipady=5)
+    
+    def browse_cl_path():
+        folder = filedialog.askdirectory(title="Select Output Folder for Cover Letters")
+        if folder:
+            cl_path_var.set(folder)
+            
+    tk.Button(f3, text="Browse...", command=browse_cl_path, font=("Segoe UI", 10, "bold"), bg="#555", fg="white", relief="flat", cursor="hand2").grid(row=5, column=1, padx=(0, 20), pady=5, sticky="ew")
+    
     f3.columnconfigure(0, weight=1)
 
     
@@ -1989,6 +1949,7 @@ def check_prerequisites(root):
             c += "# Google Sheet Configuration\n"
             c += "GOOGLE_SHEET_ID=" + sheet_entry.get().strip() + "\n"
             c += "RESUMES_SAVE_PATH=" + resume_path_var.get().strip() + "\n"
+            c += "COVER_LETTERS_SAVE_PATH=" + cl_path_var.get().strip() + "\n"
             c += "SERVICE_ACCOUNT_JSON=service_account.json\n"
             
             c += "# Automation Behavior\n"
