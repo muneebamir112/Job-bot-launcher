@@ -551,6 +551,12 @@ class ResumeBotPanel(BotPanel):
             try:
                 sheet = self._connect_sheet()
                 headers = sheet.row_values(1)
+                
+                # Check for jobs
+                jobs = self._fetch_jobs(sheet)
+                if not jobs:
+                    messagebox.showerror("Empty Sheet", "The Google Sheet is empty or contains no job links!\n\nPlease run the Scraper to add at least one job link before uploading profiles.")
+                    return
             except Exception as e:
                 messagebox.showerror("Sheet Error", f"Could not connect to Google Sheet:\n{e}")
                 return
@@ -823,6 +829,14 @@ class ResumeBotPanel(BotPanel):
             try:
                 sheet = self._connect_sheet()
                 jobs = self._fetch_jobs(sheet)
+                if not jobs:
+                    self._append_log("The Google Sheet is empty or contains no job links! Please run the scraper first.\n")
+                    if self.continuous_mode:
+                        if self._sleep_unless_stopped(30): break
+                        continue
+                    else:
+                        self._finish()
+                        return
                 headers = sheet.row_values(1)
             except Exception as e:
                 self._append_log(f"Failed to read jobs from the Google Sheet: {e}\n")
@@ -1022,6 +1036,12 @@ class CoverLetterBotPanel(ResumeBotPanel):
             try:
                 sheet = self._connect_sheet()
                 headers = sheet.row_values(1)
+                
+                # Check for jobs
+                jobs = self._fetch_jobs(sheet)
+                if not jobs:
+                    messagebox.showerror("Empty Sheet", "The Google Sheet is empty or contains no job links!\n\nPlease run the Scraper to add at least one job link before uploading profiles.")
+                    return
             except Exception as e:
                 messagebox.showerror("Sheet Error", f"Could not connect to Google Sheet:\n{e}")
                 return
@@ -1125,6 +1145,10 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     sheet = self._connect_sheet()
                     headers = sheet.get_all_values()[0]
                     jobs = self._fetch_jobs(sheet)
+                    if not jobs:
+                        self._append_log("The Google Sheet is empty or contains no job links! Please run the scraper first.\n")
+                        self._finish()
+                        return
                 except Exception as e:
                     self._append_log(f"Failed to fetch job links: {e}\nRetrying in 15s...\n")
                     if self._sleep_unless_stopped(15):
@@ -1920,15 +1944,37 @@ def check_prerequisites(root):
     input_frame = tk.Frame(f3, bg=panel_bg)
     input_frame.grid(row=5, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 20))
     
-    tk.Label(input_frame, text="Model Name:", font=("Segoe UI", 10), bg=panel_bg, fg=fg_color).grid(row=0, column=0, sticky="w", pady=5)
-    model_entry = tk.Entry(input_frame, width=25, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
-    model_entry.grid(row=0, column=1, sticky="w", padx=10, pady=5, ipady=4)
-    model_entry.insert(0, env_dict.get("OLLAMA_MODEL", "qwen2.5-coder:7b"))
-    
     tk.Label(input_frame, text="Host URL:", font=("Segoe UI", 10), bg=panel_bg, fg=fg_color).grid(row=1, column=0, sticky="w", pady=5)
     host_entry = tk.Entry(input_frame, width=35, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
-    host_entry.grid(row=1, column=1, sticky="w", padx=10, pady=5, ipady=4)
+    host_entry.grid(row=1, column=1, columnspan=2, sticky="w", padx=10, pady=5, ipady=4)
     host_entry.insert(0, env_dict.get("OLLAMA_HOST", "http://localhost:11434"))
+
+    tk.Label(input_frame, text="Model Name:", font=("Segoe UI", 10), bg=panel_bg, fg=fg_color).grid(row=0, column=0, sticky="w", pady=5)
+    model_entry = ttk.Combobox(input_frame, width=23, font=("Consolas", 11))
+    model_entry.grid(row=0, column=1, sticky="w", padx=10, pady=5, ipady=4)
+    
+    def refresh_models():
+        try:
+            import urllib.request, json
+            host_url = host_entry.get().strip().rstrip('/')
+            req = urllib.request.Request(f"{host_url}/api/tags")
+            with urllib.request.urlopen(req, timeout=2) as response:
+                data = json.loads(response.read().decode())
+                models = [m['name'] for m in data.get('models', [])]
+                if models:
+                    model_entry['values'] = models
+                    if model_entry.get() not in models:
+                        model_entry.set(models[0])
+        except Exception:
+            pass
+            
+    refresh_btn = tk.Button(input_frame, text="🔄 Fetch", command=refresh_models, bg="#555", fg="white", relief="flat", font=("Segoe UI", 9))
+    refresh_btn.grid(row=0, column=2, padx=5)
+    
+    default_model = env_dict.get("OLLAMA_MODEL", "qwen2.5-coder:7b")
+    model_entry.set(default_model)
+    model_entry['values'] = [default_model]
+    host_entry.after(500, refresh_models)
     
     tk.Label(input_frame, text="ℹ️ By default, Ollama runs on http://localhost:11434. If running remotely, use its IP address.", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 9, "italic")).grid(row=2, column=0, columnspan=2, sticky="w", pady=(5, 0))
     err_ollama_lbl = tk.Label(input_frame, text="", fg=error_color, bg=panel_bg, font=("Segoe UI", 10, "bold"))
