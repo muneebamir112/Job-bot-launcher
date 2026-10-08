@@ -1473,8 +1473,9 @@ class ScraperPanel(tk.Frame):
             try:
                 env = os.environ.copy()
                 env["JOBBOT_LAUNCHER_AUTH"] = "1"
+                cmd = [sys.executable, "open_glassdoor_profile"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "open_glassdoor_profile.py"]
                 proc = subprocess.Popen(
-                    [sys.executable, "-u", "open_glassdoor_profile.py"],
+                    cmd,
                     cwd=CURRENT_DIR,
                     stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE,
@@ -2044,7 +2045,40 @@ def check_prerequisites(root):
     err_ollama_lbl.grid(row=3, column=0, columnspan=2, sticky="w", pady=(5, 0))
     err_ollama_lbl.grid_remove()
     
-    # Section 4 - Verification
+    # Section 4 - Browser Automation
+    f4 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
+    f4.pack(fill="x", pady=10, padx=5)
+    
+    tk.Label(f4, text="4. Browser Engine (Chromium)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f4, text="The bot needs Chromium to browse job sites. If not installed, click below to download it.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
+    
+    browser_status_var = tk.StringVar(value="Status: Ready to install/verify")
+    browser_status_lbl = tk.Label(f4, textvariable=browser_status_var, bg=panel_bg, fg="#FFB900", font=("Segoe UI", 10, "bold"))
+    browser_status_lbl.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 15))
+    
+    def install_browser():
+        install_browser_btn.configure(state="disabled", text="Installing... (May take a few minutes)")
+        setup_win.update()
+        try:
+            if getattr(sys, 'frozen', False):
+                cmd = [sys.executable, "install_browser"]
+            else:
+                cmd = [sys.executable, "-m", "patchright", "install", "chromium"]
+            
+            subprocess.run(cmd, check=True, creationflags=0x08000000)
+            
+            browser_status_var.set("Status: Installed ✔")
+            browser_status_lbl.configure(fg=success_color)
+            install_browser_btn.configure(text="Installed")
+        except Exception as e:
+            browser_status_var.set(f"Status: Failed ✖ ({e})")
+            browser_status_lbl.configure(fg=error_color)
+            install_browser_btn.configure(state="normal", text="Retry Install")
+            
+    install_browser_btn = tk.Button(f4, text="Install / Verify Chromium", command=install_browser, bg="#333333", fg=fg_color, relief="flat", cursor="hand2", padx=10)
+    install_browser_btn.grid(row=3, column=0, sticky="w", padx=20, pady=(0, 15))
+
+    # Section 5 - Verification
     f5 = tk.Frame(frame, bg=bg_color)
     f5.pack(fill="x", pady=(20, 10), padx=5)
     

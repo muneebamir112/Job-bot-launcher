@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 
 # Allow execution from launcher without security alert
 os.environ["JOBBOT_LAUNCHER_AUTH"] = "1"
@@ -12,35 +13,43 @@ else:
 BASE_DIR = os.path.dirname(CURRENT_DIR)
 PROFILE_DIR = os.path.join(BASE_DIR, "scraper", "GlassD", "profiles", "glassdoor_profile")
 
+def find_chrome():
+    paths = [
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
+    ]
+    for p in paths:
+        if os.path.exists(p):
+            return p
+    return None
+
 def main():
-    try:
-        from patchright.sync_api import sync_playwright
-    except ImportError:
-        print("patchright is not installed.")
+    os.makedirs(PROFILE_DIR, exist_ok=True)
+    print("Opening Glassdoor profile for manual login natively...")
+    
+    chrome_path = find_chrome()
+    if not chrome_path:
+        print("Could not find Google Chrome installed on this system.")
         sys.exit(1)
         
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    print("Opening Glassdoor profile for manual login...")
-    with sync_playwright() as p:
-        try:
-            context = p.chromium.launch_persistent_context(
-                PROFILE_DIR,
-                channel="chrome",
-                headless=False,
-                no_viewport=True,
-            )
-        except Exception as e:
-            print(f"Launch failed: {e}")
-            return
-
-        page = context.pages[0] if context.pages else context.new_page()
-        page.goto("https://www.glassdoor.com/Job/index.htm")
-        print("Browser opened for manual login. Close the browser window when done.")
-        
-        try:
-            context.wait_for_event("close", timeout=0)
-        except Exception:
-            pass
+    cmd = [
+        chrome_path,
+        f"--user-data-dir={PROFILE_DIR}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "https://www.glassdoor.com/Job/index.htm"
+    ]
+    
+    print("Browser opened for manual login. Close the browser window when done.")
+    try:
+        # Wait for the user to close Chrome
+        proc = subprocess.Popen(cmd)
+        proc.wait()
+    except KeyboardInterrupt:
+        pass
+    except Exception as e:
+        print(f"Error launching Chrome: {e}")
 
 if __name__ == "__main__":
     main()

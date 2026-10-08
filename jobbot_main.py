@@ -40,6 +40,13 @@ def main():
         sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scraper", "Jobgether")))
         from jobgether_scraper import main as jg_main  # type: ignore
         asyncio.run(jg_main())
+    elif command == "install_browser":
+        from patchright.__main__ import main as patchright_main
+        sys.argv = [sys.executable, "install", "chromium"]
+        patchright_main()
+    elif command == "open_glassdoor_profile":
+        import open_glassdoor_profile
+        open_glassdoor_profile.main()
     else:
         print(f"Unknown command: {command}")
         sys.exit(1)
