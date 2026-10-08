@@ -5,7 +5,7 @@ import sys
 
 def main():
     root_dir = r"D:\webncodes"
-    release_dir = os.path.join(root_dir, "JobBot_Pro_Release")
+    release_dir = os.path.join(root_dir, "JobBot_Pro_Release_v2")
     launcher_dir = os.path.join(root_dir, "Job-bot-launcher")
     
     print("========================================")
@@ -78,7 +78,7 @@ def main():
     # Copy the Glassdoor profile so the user stays logged in
     glassdoor_profiles_src = os.path.join(root_dir, "scraper", "GlassD", "profiles")
     if os.path.exists(glassdoor_profiles_src):
-        shutil.copytree(glassdoor_profiles_src, os.path.join(release_dir, "profiles"), dirs_exist_ok=True)
+        shutil.copytree(glassdoor_profiles_src, os.path.join(release_dir, "profiles"), dirs_exist_ok=True, ignore=shutil.ignore_patterns('Cache', 'Code Cache', 'GPUCache', '*Cache*'))
         print("[+] Copied Glassdoor browser profile to release")
     
     print(f"\n[+] SUCCESS! Your highly optimized monolith release is ready at:")

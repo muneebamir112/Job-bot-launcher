@@ -1331,6 +1331,11 @@ class ScraperPanel(tk.Frame):
         )
         self.edit_kw_btn.pack(side="left", padx=4)
 
+        self.open_profile_btn = ttk.Button(
+            btn_frame, text="Open Profile", width=14, command=self.open_profile, style="Secondary.TButton",
+        )
+        self.open_profile_btn.pack(side="left", padx=4)
+
         self.status_label = tk.Label(self, text="Idle", fg=COLORS["idle"], bg=COLORS["panel_bg"], font=("Segoe UI", 9))
         self.status_label.pack(pady=(0, 6))
 
@@ -1456,6 +1461,37 @@ class ScraperPanel(tk.Frame):
                 box.delete("1.0", "end")
                 box.configure(state="disabled")
         self.after(0, _do)
+
+    def open_profile(self):
+        if self.is_running():
+            from tkinter import messagebox
+            messagebox.showwarning("Warning", "Cannot open profile while scraper is running.")
+            return
+            
+        def _run_profile():
+            self._log("Opening Glassdoor profile for manual login...")
+            try:
+                env = os.environ.copy()
+                env["JOBBOT_LAUNCHER_AUTH"] = "1"
+                proc = subprocess.Popen(
+                    [sys.executable, "-u", "open_glassdoor_profile.py"],
+                    cwd=CURRENT_DIR,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=0x08000000,
+                    env=env
+                )
+                for line in proc.stdout:
+                    self._log(line)
+                proc.wait()
+                self._log("Profile browser closed.\n")
+            except Exception as e:
+                self._log(f"Failed to open profile: {e}\n")
+                
+        threading.Thread(target=_run_profile, daemon=True).start()
 
     def _log(self, text):
         """Log an orchestration-level message (batch start/stop, keyword
