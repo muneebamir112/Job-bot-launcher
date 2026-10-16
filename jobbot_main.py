@@ -2,6 +2,15 @@ import sys
 import os
 
 def main():
+    # Ensure Patchright/Playwright can locate browsers in frozen mode
+    if "PLAYWRIGHT_BROWSERS_PATH" not in os.environ and getattr(sys, "frozen", False):
+        base_dir = os.path.dirname(sys.executable)
+        bundled_browsers = os.path.join(base_dir, "_internal", "patchright", "driver", "package", ".local-browsers")
+        if not os.path.exists(bundled_browsers):
+            sys_browsers = os.path.expandvars(r"%LOCALAPPDATA%\ms-playwright")
+            if os.path.exists(sys_browsers):
+                os.environ["PLAYWRIGHT_BROWSERS_PATH"] = sys_browsers
+
     if len(sys.argv) < 2:
         # Default to launching the UI if double-clicked
         command = "launcher"
@@ -47,6 +56,9 @@ def main():
     elif command == "open_glassdoor_profile":
         import open_glassdoor_profile
         open_glassdoor_profile.main()
+    elif command in ("scrape_questions", "scrape_form_questions"):
+        import scrape_form_questions
+        scrape_form_questions.main()
     else:
         print(f"Unknown command: {command}")
         sys.exit(1)

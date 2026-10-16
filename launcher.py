@@ -961,7 +961,7 @@ class ResumeBotPanel(BotPanel):
                     failed += 1
                     continue
 
-                model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+                model_name = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
                 self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
                 self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\" \"{model_name}\"\n\n")
                 code = self._run_subprocess(self._get_cmd("ollama_generate.py", jd_filename, company, profile_name, model_name))
@@ -1219,7 +1219,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         failed += 1
                         continue
 
-                    model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
+                    model_name = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
                     self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
                     self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\" \"{model_name}\"\n\n")
                 
@@ -2467,6 +2467,30 @@ def main():
     )
     cover_letter_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
+    class QuestionScraperPanel(BotPanel):
+        def __init__(self, parent):
+            super().__init__(
+                parent, "Question Scraper", "Scrape Form Questions",
+                "scrape_form_questions.py", CURRENT_DIR,
+                log_file=os.path.join(LOGS_DIR, "scrape_questions.log"),
+            )
+            self.edit_kw_btn.pack_forget()
+
+        def build_inputs(self, parent):
+            tk.Label(
+                parent,
+                text="Scrapes questions from all job forms in the sheet\nregardless of resume status and saves to Google Doc.",
+                fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
+            ).pack(anchor="w", pady=(0, 6))
+
+        def build_command(self):
+            if getattr(sys, 'frozen', False):
+                return [sys.executable, "scrape_form_questions"]
+            return [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
+
+    questions_panel = QuestionScraperPanel(container)
+    questions_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
+
     class JobBotPanel(BotPanel):
         def build_inputs(self, parent):
             tk.Label(
@@ -2509,6 +2533,9 @@ def main():
         scraper_panel.terminate_now()
         resume_panel.terminate_now()
         cover_letter_panel.terminate_now()
+        questions_panel.stop()
+        if questions_panel.process is not None:
+            questions_panel.process.terminate()
         apply_panel.stop()
         if apply_panel.process is not None:
             apply_panel.process.terminate()
