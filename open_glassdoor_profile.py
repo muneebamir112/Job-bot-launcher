@@ -15,6 +15,8 @@ PROFILE_DIR = os.path.join(BASE_DIR, "scraper", "GlassD", "profiles", "glassdoor
 
 def find_chrome():
     paths = [
+        "/opt/google/chrome/chrome",
+        "/usr/bin/google-chrome",
         r"C:\Program Files\Google\Chrome\Application\chrome.exe",
         r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
         os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe")
@@ -32,10 +34,11 @@ def main():
     if not chrome_path:
         print("Could not find Google Chrome installed on this system.")
         sys.exit(1)
-        
+    print(f"Profile Directory: {PROFILE_DIR}")
     cmd = [
         chrome_path,
         f"--user-data-dir={PROFILE_DIR}",
+        "--password-store=basic",
         "--no-first-run",
         "--no-default-browser-check",
         "https://www.glassdoor.com/Job/index.htm"

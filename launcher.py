@@ -32,6 +32,7 @@ if getattr(sys, 'frozen', False):
     CURRENT_DIR = os.path.dirname(sys.executable)
 else:
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+import hashlib
 import queue
 import re
 import subprocess
@@ -322,7 +323,7 @@ class BotPanel(tk.Frame):
                 stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
-                creationflags=0x08000000,
+                creationflags=(0x08000000 if sys.platform == "win32" else 0),
                 env=os.environ.copy()
             )
         except Exception as e:
@@ -762,8 +763,81 @@ class ResumeBotPanel(BotPanel):
         except:
             return spreadsheet.sheet1
 
+    DESCRIPTION_HEADER = "Job Description"
+
+    @staticmethod
+    def _col_letter(n):
+        """1-based column number -> letters (1 -> A, 27 -> AA)."""
+        letters = ""
+        while n:
+            n, rem = divmod(n - 1, 26)
+            letters = chr(65 + rem) + letters
+        return letters
+
+    def _description_col(self, headers):
+        """0-based index of the Job Description column, or None on a sheet that doesn't have it yet."""
+        return headers.index(self.DESCRIPTION_HEADER) if self.DESCRIPTION_HEADER in headers else None
+
+    def _first_profile_col(self, headers):
+        """0-based column where candidate names start: right after Job Description (old sheets: column I)."""
+        d = self._description_col(headers)
+        return d + 1 if d is not None else 8
+
+    def _read_rows(self, ws):
+        """Data rows (from row 2) at full header width, without downloading the long Job Description column."""
+        headers = ws.row_values(1)
+        d = self._description_col(headers)
+        if d is None or d < 1:
+            return ws.get_all_values()[1:]  # old layout: no description column yet
+        n = len(headers)
+        ranges = [f"A2:{self._col_letter(d)}"]
+        if n > d + 1:
+            ranges.append(f"{self._col_letter(d + 2)}2:{self._col_letter(n)}")
+        parts = ws.batch_get(ranges)
+        left = parts[0]
+        right = parts[1] if len(parts) > 1 else []
+        rows = []
+        for i in range(max(len(left), len(right))):
+            l = list(left[i]) if i < len(left) else []
+            r = list(right[i]) if i < len(right) else []
+            rows.append(l + [""] * (d - len(l)) + [""] + r)
+        return rows
+
+    def _load_descriptions(self, ws, headers, rows):
+        """{sheet row: stored description} for the rows still to do (read in chunks); {} on an old sheet."""
+        d = self._description_col(headers)
+        rows = sorted(set(rows))
+        if d is None or not rows:
+            return {}
+        col = self._col_letter(d + 1)
+        out = {}
+        try:
+            for i in range(0, len(rows), 40):
+                chunk = rows[i:i + 40]
+                for row, part in zip(chunk, ws.batch_get([f"{col}{r}" for r in chunk])):
+                    out[row] = part[0][0].strip() if part and part[0] else ""
+        except Exception as e:
+            self._append_log(f"  Could not read stored descriptions ({e}); fetching instead.\n")
+        return out
+
+    def _store_description(self, ws, headers, row, jd_path):
+        """Keep a freshly fetched description in the sheet so other candidates don't fetch it again."""
+        d = self._description_col(headers)
+        if d is None:
+            return ""
+        try:
+            with open(jd_path, encoding="utf-8") as f:
+                text = f.read().strip()[:20000]
+            if len(text) < self.MIN_JD_CHARS:
+                return ""
+            ws.update(range_name=f"{self._col_letter(d + 1)}{row}", values=[[text]], value_input_option="RAW")
+            return text
+        except Exception as e:
+            self._append_log(f"  Could not store the description in the sheet: {e}\n")
+            return ""
+
     def _fetch_jobs(self, ws):
-        rows = ws.get_all_values()[1:]  # skip header row
+        rows = self._read_rows(ws)
         jobs = []
         for i, r in enumerate(rows, start=2):  # row 2 is the first data row
             if len(r) < 6:
@@ -809,7 +883,7 @@ class ResumeBotPanel(BotPanel):
                     cmd, cwd=self.cwd, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1, encoding='utf-8', errors='replace',
-                    creationflags=0x08000000,
+                    creationflags=(0x08000000 if sys.platform == "win32" else 0),
                     env=env
                 )
         except Exception as e:
@@ -861,8 +935,9 @@ class ResumeBotPanel(BotPanel):
             if hasattr(self, 'active_profiles') and self.active_profiles:
                 profile_names = self.active_profiles
             else:
-                # Profiles start at column index 8 (0-based) which is column I (1-based is 9)
-                profile_names = headers[8:8+num_profiles]
+                # Candidate columns start right after the "Job Description" column
+                start = self._first_profile_col(headers)
+                profile_names = headers[start:start + num_profiles]
 
             todo = []
             for company, link, row, row_data in jobs:
@@ -892,6 +967,7 @@ class ResumeBotPanel(BotPanel):
                     f"Queued {len(todo)} resume generation(s) across {num_profiles} profile(s)\n"
                 )
 
+            descriptions = self._load_descriptions(sheet, headers, [t[2] for t in todo])
             made = failed = 0
             for idx, (company, link, row, profile_name, col_index) in enumerate(todo, start=1):
                 if self._stop_requested:
@@ -899,67 +975,76 @@ class ResumeBotPanel(BotPanel):
 
                 self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
 
-                self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
-                self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
-                code = self._run_subprocess(self._get_cmd("fetch_jd.py", link, company))
-                if code is None:
-                    break
-                if code != 0:
-                    self._append_log(f"  Fetch failed for {company}, retrying once more in 15s...\n")
-                    if self._sleep_unless_stopped(15):
-                        break
-                    self._append_log(f"$ fetch_jd.py {link} \"{company}\" (retry)\n\n")
+                stored = descriptions.get(row, "")
+                if len(stored) >= self.MIN_JD_CHARS:
+                    jd_filename = f"jd_{hashlib.sha1(link.encode('utf-8')).hexdigest()[:12]}.txt"
+                    jd_path = os.path.join(self.cwd, jd_filename)
+                    with open(jd_path, "w", encoding="utf-8") as f:
+                        f.write(stored)
+                    self._append_log("  Using the job description stored in the sheet (no fetch)\n")
+                else:
+                    self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
+                    self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
                     code = self._run_subprocess(self._get_cmd("fetch_jd.py", link, company))
                     if code is None:
                         break
-                if code != 0:
-                    self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
-                    error_msg = "Fetch Failed"
-                    if hasattr(self, '_last_output'):
-                        out = self._last_output.lower()
-                        if "403" in out or "forbidden" in out:
-                            error_msg = "Blocked (403)"
-                        elif "404" in out or "410" in out or "expired" in out:
-                            error_msg = "Expired (404)"
-                        elif "invalidschema" in out or "chrome-error" in out:
-                            error_msg = "Invalid/Broken Link"
-                    try:
-                        sheet.update_cell(row, col_index, error_msg)
-                    except Exception:
-                        pass
-                    failed += 1
-                    continue
+                    if code != 0:
+                        self._append_log(f"  Fetch failed for {company}, retrying once more in 15s...\n")
+                        if self._sleep_unless_stopped(15):
+                            break
+                        self._append_log(f"$ fetch_jd.py {link} \"{company}\" (retry)\n\n")
+                        code = self._run_subprocess(self._get_cmd("fetch_jd.py", link, company))
+                        if code is None:
+                            break
+                    if code != 0:
+                        self._append_log(f"  Failed to fetch the job description for {company}, skipping.\n")
+                        error_msg = "Fetch Failed"
+                        if hasattr(self, '_last_output'):
+                            out = self._last_output.lower()
+                            if "403" in out or "forbidden" in out:
+                                error_msg = "Blocked (403)"
+                            elif "404" in out or "410" in out or "expired" in out:
+                                error_msg = "Expired (404)"
+                            elif "invalidschema" in out or "chrome-error" in out:
+                                error_msg = "Invalid/Broken Link"
+                        try:
+                            sheet.update_cell(row, col_index, error_msg)
+                        except Exception:
+                            pass
+                        failed += 1
+                        continue
 
-                jd_filename = f"jd_{self._slugify(company)}.txt"
-                jd_path = os.path.join(self.cwd, jd_filename)
-                try:
-                    with open(jd_path, encoding="utf-8") as f:
-                        jd_len = len(f.read().strip())
-                except OSError as e:
-                    self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
+                    jd_filename = f"jd_{self._slugify(company)}.txt"
+                    jd_path = os.path.join(self.cwd, jd_filename)
                     try:
-                        sheet.update_cell(row, col_index, "Failed to read JD")
-                    except Exception:
-                        pass
-                    failed += 1
-                    continue
-                if jd_len < self.MIN_JD_CHARS:
-                    self._append_log(
-                        f"  Job description is only {jd_len} characters. This usually "
-                        f"indicates an expired job link (404) or consent wall. "
-                        f"Skipping resume generation to prevent garbage data.\n"
-                    )
-                    try:
-                        sheet.update_cell(row, col_index, "Invalid JD (Too short)")
-                    except Exception:
-                        pass
-                    try:
-                        if os.path.exists(jd_path):
-                            os.remove(jd_path)
-                    except OSError:
-                        pass
-                    failed += 1
-                    continue
+                        with open(jd_path, encoding="utf-8") as f:
+                            jd_len = len(f.read().strip())
+                    except OSError as e:
+                        self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
+                        try:
+                            sheet.update_cell(row, col_index, "Failed to read JD")
+                        except Exception:
+                            pass
+                        failed += 1
+                        continue
+                    if jd_len < self.MIN_JD_CHARS:
+                        self._append_log(
+                            f"  Job description is only {jd_len} characters. This usually "
+                            f"indicates an expired job link (404) or consent wall. "
+                            f"Skipping resume generation to prevent garbage data.\n"
+                        )
+                        try:
+                            sheet.update_cell(row, col_index, "Invalid JD (Too short)")
+                        except Exception:
+                            pass
+                        try:
+                            if os.path.exists(jd_path):
+                                os.remove(jd_path)
+                        except OSError:
+                            pass
+                        failed += 1
+                        continue
+                    descriptions[row] = self._store_description(sheet, headers, row, jd_path)
 
                 model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
                 self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
@@ -1150,7 +1235,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
                 self._set_status("Connecting to Google Sheets...")
                 try:
                     sheet = self._connect_sheet()
-                    headers = sheet.get_all_values()[0]
+                    headers = sheet.row_values(1)
                     jobs = self._fetch_jobs(sheet)
                     if not jobs:
                         self._append_log("The Google Sheet is empty or contains no job links! Please run the scraper first.\n")
@@ -1172,7 +1257,8 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         num_profiles = int(self.num_profiles_var.get())
                     except ValueError:
                         num_profiles = 1
-                    profile_names = headers[8:8+num_profiles]
+                    start = self._first_profile_col(headers)
+                    profile_names = headers[start:start + num_profiles]
 
                 todo = []
                 COVERLETTER_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
@@ -1189,6 +1275,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         f"Queued {len(todo)} cover letter generation(s) across {num_profiles} profile(s)\n"
                     )
 
+                descriptions = self._load_descriptions(sheet, headers, [t[2] for t in todo])
                 made = failed = 0
                 for idx, (company, link, row, profile_name) in enumerate(todo, start=1):
                     if self._stop_requested:
@@ -1199,25 +1286,34 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     jd_filename = f"jd_{self._slugify(company)}.txt"
                     jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
 
-                    self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
-                    self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
+                    stored = descriptions.get(row, "")
+                    if len(stored) >= self.MIN_JD_CHARS:
+                        jd_filename = f"jd_{hashlib.sha1(link.encode('utf-8')).hexdigest()[:12]}.txt"
+                        jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
+                        with open(jd_path, "w", encoding="utf-8") as f:
+                            f.write(stored)
+                        self._append_log("  Using the job description stored in the sheet (no fetch)\n")
+                    else:
+                        self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — fetching JD")
+                        self._append_log(f"$ fetch_jd.py {link} \"{company}\"\n\n")
                 
-                    # Run fetch_jd from ResumeBot dir
-                    cwd_resumebot = BASE_DIR if getattr(sys, 'frozen', False) else RESUMEBOT_DIR
-                    cmd_fetch = self._get_cmd("fetch_jd.py", link, company)
+                        # Run fetch_jd from ResumeBot dir
+                        cwd_resumebot = BASE_DIR if getattr(sys, 'frozen', False) else RESUMEBOT_DIR
+                        cmd_fetch = self._get_cmd("fetch_jd.py", link, company)
                 
-                    # temporarily override cwd for fetch
-                    old_cwd = self.cwd
-                    self.cwd = cwd_resumebot
-                    code = self._run_subprocess(cmd_fetch)
-                    self.cwd = old_cwd
+                        # temporarily override cwd for fetch
+                        old_cwd = self.cwd
+                        self.cwd = cwd_resumebot
+                        code = self._run_subprocess(cmd_fetch)
+                        self.cwd = old_cwd
 
-                    if code is None:
-                        break
-                    if code != 0:
-                        self._append_log(f"  Fetch failed for {company}, skipping cover letter generation.\n")
-                        failed += 1
-                        continue
+                        if code is None:
+                            break
+                        if code != 0:
+                            self._append_log(f"  Fetch failed for {company}, skipping cover letter generation.\n")
+                            failed += 1
+                            continue
+                        descriptions[row] = self._store_description(sheet, headers, row, jd_path)
 
                     model_name = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
                     self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
@@ -1482,7 +1578,7 @@ class ScraperPanel(tk.Frame):
                     stderr=subprocess.STDOUT,
                     text=True,
                     bufsize=1,
-                    creationflags=0x08000000,
+                    creationflags=(0x08000000 if sys.platform == "win32" else 0),
                     env=env
                 )
                 for line in proc.stdout:
@@ -1651,7 +1747,7 @@ class ScraperPanel(tk.Frame):
                     cmd, cwd=cwd, stdin=subprocess.DEVNULL,
                     stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                     text=True, bufsize=1,
-                    creationflags=0x08000000,
+                    creationflags=(0x08000000 if sys.platform == "win32" else 0),
                     env=os.environ.copy()
                 )
             except Exception as e:
@@ -2065,7 +2161,7 @@ def check_prerequisites(root):
             else:
                 cmd = [sys.executable, "-m", "patchright", "install", "chromium"]
             
-            subprocess.run(cmd, check=True, creationflags=0x08000000)
+            subprocess.run(cmd, check=True, creationflags=(0x08000000 if sys.platform == "win32" else 0))
             
             browser_status_var.set("Status: Installed ✔")
             browser_status_lbl.configure(fg=success_color)
@@ -2462,7 +2558,7 @@ def main():
 
     cover_letter_panel = CoverLetterBotPanel(
         container, "Cover Letter Bot", "Generate Cover Letters",
-        "batch_generate.py", BASE_DIR if getattr(sys, 'frozen', False) else r"C:\Users\webNcodes\Desktop\webncodes\cover_letter_bot",
+        "batch_generate.py", BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "cover_letter_bot"),
         log_file=os.path.join(LOGS_DIR, "cover_letter_bot.log"),
     )
     cover_letter_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
