@@ -7,4 +7,6 @@ build
 dist
 *.spec
 
+credentials.json
+token.json
 scratch/

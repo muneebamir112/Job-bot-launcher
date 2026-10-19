@@ -1065,6 +1065,17 @@ class ResumeBotPanel(BotPanel):
                         sheet.update_cell(row, col_index, "Generated")
                     except Exception as e:
                         self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
+
+                    # Auto-sync to Google Drive if credentials.json or token.json is present
+                    try:
+                        if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                            import google_drive_uploader
+                            drive_service = google_drive_uploader.get_drive_service()
+                            drive_folder_id = google_drive_uploader.get_or_create_folder(drive_service)
+                            google_drive_uploader.upload_file_to_drive(drive_service, pdf_path, drive_folder_id)
+                            self._append_log(f"  [Drive] Synced {profile_name} - {company}.pdf to Google Drive\n")
+                    except Exception as drive_err:
+                        self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
                     
                 # Clean up the JD text file regardless of success or failure
                 try:
@@ -1333,6 +1344,17 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         failed += 1
                     else:
                         made += 1
+                        # Auto-sync to Google Drive if credentials.json or token.json is present
+                        try:
+                            if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                                import google_drive_uploader
+                                cl_pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
+                                drive_service = google_drive_uploader.get_drive_service()
+                                drive_folder_id = google_drive_uploader.get_or_create_folder(drive_service)
+                                google_drive_uploader.upload_file_to_drive(drive_service, cl_pdf_path, drive_folder_id)
+                                self._append_log(f"  [Drive] Synced Cover Letter - {profile_name} - {company}.pdf to Google Drive\n")
+                        except Exception as drive_err:
+                            self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
                     
                     # Clean up the JD text file regardless of success or failure
                     try:
@@ -2432,10 +2454,11 @@ def sync_configs():
     sa_src = os.path.join(current_dir, "service_account.json")
     
     targets = [
+        os.path.join(parent_dir, "Job-Bot"),
         os.path.join(parent_dir, "scraper", "GlassD"),
         os.path.join(parent_dir, "scraper", "Hiring_cafe"),
         os.path.join(parent_dir, "scraper", "Jobgether"),
-        os.path.join(parent_dir, "resume-bot")
+        os.path.join(parent_dir, "resume-bot"),
     ]
     
     for t in targets:
