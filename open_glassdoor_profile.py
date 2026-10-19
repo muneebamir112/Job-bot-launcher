@@ -1,12 +1,12 @@
 import os
 import sys
-import subprocess
 
 # Allow execution from launcher without security alert
 os.environ["JOBBOT_LAUNCHER_AUTH"] = "1"
 
 if getattr(sys, 'frozen', False):
     CURRENT_DIR = os.path.dirname(sys.executable)
+    PROFILE_DIR = os.path.join(CURRENT_DIR, "profiles", "glassdoor_profile")
 else:
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     
@@ -27,12 +27,10 @@ def find_chrome():
     return None
 
 def main():
-    os.makedirs(PROFILE_DIR, exist_ok=True)
-    print("Opening Glassdoor profile for manual login natively...")
-    
-    chrome_path = find_chrome()
-    if not chrome_path:
-        print("Could not find Google Chrome installed on this system.")
+    try:
+        from patchright.sync_api import sync_playwright
+    except ImportError:
+        print("patchright is not installed.")
         sys.exit(1)
     print(f"Profile Directory: {PROFILE_DIR}")
     cmd = [
