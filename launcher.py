@@ -964,8 +964,8 @@ class ResumeBotPanel(BotPanel):
                         if header_idx < len(row_data):
                             sheet_status = row_data[header_idx].strip().lower()
                             
-                        # Check if the Google Sheet already says it's done
-                        if sheet_status in ("generated", "applied", "submitted", "human attention"):
+                        # Check if the Google Sheet already says resume is done
+                        if sheet_status in ("applied", "submitted", "human attention") or "resume" in sheet_status or sheet_status == "generated":
                             continue
                             
                     except ValueError:
@@ -974,7 +974,7 @@ class ResumeBotPanel(BotPanel):
                     pdf_path = os.path.join(CVS_DIR, f"{profile_name} - {company}.pdf")
                     pdf_nested = os.path.join(CVS_DIR, profile_name, f"{profile_name} - {company}.pdf")
                     if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested)):
-                        todo.append((company, link, row, profile_name, col_index))
+                        todo.append((company, link, row, profile_name, col_index, row_data))
 
             if todo:
                 self._append_log(
@@ -984,7 +984,7 @@ class ResumeBotPanel(BotPanel):
 
             descriptions = self._load_descriptions(sheet, headers, [t[2] for t in todo])
             made = failed = 0
-            for idx, (company, link, row, profile_name, col_index) in enumerate(todo, start=1):
+            for idx, (company, link, row, profile_name, col_index, row_data) in enumerate(todo, start=1):
                 if self._stop_requested:
                     break
 
@@ -1077,7 +1077,14 @@ class ResumeBotPanel(BotPanel):
                 else:
                     made += 1
                     try:
-                        sheet.update_cell(row, col_index, "Generated")
+                        cur_status = row_data[col_index - 1].strip() if (col_index - 1) < len(row_data) else ""
+                        cur_lower = cur_status.lower()
+                        if "cover letter" in cur_lower:
+                            new_status = "Resume & Cover Letter Generated"
+                        else:
+                            new_status = "Resume Generated"
+                        sheet.update_cell(row, col_index, new_status)
+                        self._append_log(f"  [Sheet] Marked '{new_status}' for {profile_name} (row {row})\n")
                     except Exception as e:
                         self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
 
@@ -1306,13 +1313,24 @@ class CoverLetterBotPanel(ResumeBotPanel):
                 ALT_COVERLETTER_DIR = os.path.join(BASE_DIR, "CVs")
                 for company, link, row, row_data in jobs:
                     for profile_name in profile_names:
-                        # Don't check the Google sheet for cover letter status, just check the file!
+                        try:
+                            header_idx = headers.index(profile_name)
+                            col_index = header_idx + 1
+                            sheet_status = ""
+                            if header_idx < len(row_data):
+                                sheet_status = row_data[header_idx].strip().lower()
+                            if sheet_status in ("applied", "submitted") or "cover letter" in sheet_status:
+                                continue
+                        except ValueError:
+                            col_index = None
+
+                        # Check if cover letter already exists on disk
                         pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
                         pdf_nested = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
                         alt_path = os.path.join(ALT_COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
                         alt_nested = os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
                         if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested) or os.path.exists(alt_path) or os.path.exists(alt_nested)):
-                            todo.append((company, link, row, profile_name))
+                            todo.append((company, link, row, profile_name, col_index, row_data))
 
                 if todo:
                     self._append_log(
@@ -1322,7 +1340,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
 
                 descriptions = self._load_descriptions(sheet, headers, [t[2] for t in todo])
                 made = failed = 0
-                for idx, (company, link, row, profile_name) in enumerate(todo, start=1):
+                for idx, (company, link, row, profile_name, col_index, row_data) in enumerate(todo, start=1):
                     if self._stop_requested:
                         break
 
@@ -1378,6 +1396,21 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         failed += 1
                     else:
                         made += 1
+                        # Mark status in Google Sheet under profile column
+                        if col_index:
+                            try:
+                                header_idx = col_index - 1
+                                cur_status = row_data[header_idx].strip() if header_idx < len(row_data) else ""
+                                cur_lower = cur_status.lower()
+                                if "resume" in cur_lower or cur_lower == "generated":
+                                    new_status = "Resume & Cover Letter Generated"
+                                else:
+                                    new_status = "Cover Letter Generated"
+                                sheet.update_cell(row, col_index, new_status)
+                                self._append_log(f"  [Sheet] Marked '{new_status}' for {profile_name} (row {row})\n")
+                            except Exception as e:
+                                self._append_log(f"  [Sheet Warning] Could not mark sheet: {e}\n")
+
                         # Auto-sync to Google Drive if credentials.json or token.json is present
                         try:
                             if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
