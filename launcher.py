@@ -68,6 +68,7 @@ else:
 # actual rendered resumes end up; used here only to check whether one
 # already exists for a company (see ResumeBotPanel._run).
 CVS_DIR = os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
+APP_VERSION = "2.0.0"
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(CURRENT_DIR, ".env"))
@@ -2428,7 +2429,7 @@ def check_prerequisites(root):
     return True
 
 def run_auth_check(root):
-    import urllib.request, urllib.parse, json, os, shutil
+    import urllib.request, urllib.parse, json, os, shutil, webbrowser
     from tkinter import simpledialog, messagebox
     import tkinter as tk
     
@@ -2443,17 +2444,165 @@ def run_auth_check(root):
     def verify_email(e):
         try:
             url = 'https://job-bot.webncodes.site/api/verify-email'
-            data = urllib.parse.urlencode({'email': e}).encode('utf-8')
+            payload = {'email': e, 'version': APP_VERSION}
+            data = urllib.parse.urlencode(payload).encode('utf-8')
             req = urllib.request.Request(url, data=data)
-            with urllib.request.urlopen(req) as response:
+            with urllib.request.urlopen(req, timeout=10) as response:
                 result = json.loads(response.read().decode('utf-8'))
-                return result.get('valid'), result.get('message', 'Failed')
+                return result.get('valid'), result.get('message', 'Failed'), result
         except Exception as ex:
-            return False, f'API Error: {ex}'
+            return False, f'API Error: {ex}', {}
+
+    def prompt_update(update_info):
+        latest_ver = update_info.get('latest_version') or 'New Version'
+        download_url = update_info.get('download_url') or 'https://job-bot.webncodes.site/download-latest'
+        changelog = update_info.get('changelog') or 'Performance improvements and new features.'
+        is_mandatory = update_info.get('is_mandatory', True)
+
+        up_win = tk.Toplevel(root)
+        up_win.title('Job Bot Update Available')
+        up_win.geometry('480x360')
+        up_win.minsize(400, 280)
+        up_win.configure(bg='#1e293b')
+        up_win.grab_set()
+
+        try:
+            up_win.update_idletasks()
+            sw = up_win.winfo_screenwidth()
+            sh = up_win.winfo_screenheight()
+            w, h = 480, 360
+            x = max(0, (sw - w) // 2)
+            y = max(0, (sh - h) // 2)
+            up_win.geometry(f"{w}x{h}+{x}+{y}")
+        except Exception:
+            pass
+
+        def on_update_close():
+            if is_mandatory:
+                root.destroy()
+                import os; os._exit(0)
+            else:
+                up_win.destroy()
+        up_win.protocol('WM_DELETE_WINDOW', on_update_close)
+
+        # 1. ALWAYS pack the button frame at the bottom FIRST so it is NEVER hidden
+        btn_frame = tk.Frame(up_win, bg='#1e293b')
+        btn_frame.pack(side='bottom', fill='x', padx=20, pady=(8, 16))
+
+        def on_click_update():
+            webbrowser.open(download_url)
+            if is_mandatory:
+                messagebox.showinfo(
+                    'Downloading Update', 
+                    f'The latest installer (v{latest_ver}) has been opened in your browser.\n\n'
+                    'Please install the latest version to continue.'
+                )
+                root.destroy()
+                import os; os._exit(0)
+            else:
+                up_win.destroy()
+
+        update_btn = tk.Button(
+            btn_frame, 
+            text='⬇ Update Now', 
+            command=on_click_update, 
+            bg='#0ea5e9', 
+            fg='white', 
+            font=('Segoe UI', 10, 'bold'), 
+            relief='flat', 
+            padx=16, 
+            pady=6, 
+            cursor='hand2'
+        )
+        update_btn.pack(side='right', padx=4)
+
+        if not is_mandatory:
+            later_btn = tk.Button(
+                btn_frame, 
+                text='Remind Me Later', 
+                command=up_win.destroy, 
+                bg='#334155', 
+                fg='#cbd5e1', 
+                font=('Segoe UI', 9), 
+                relief='flat', 
+                padx=12, 
+                pady=6, 
+                cursor='hand2'
+            )
+            later_btn.pack(side='right', padx=4)
+        else:
+            quit_btn = tk.Button(
+                btn_frame, 
+                text='Exit', 
+                command=on_update_close, 
+                bg='#334155', 
+                fg='#cbd5e1', 
+                font=('Segoe UI', 9), 
+                relief='flat', 
+                padx=14, 
+                pady=6, 
+                cursor='hand2'
+            )
+            quit_btn.pack(side='left', padx=4)
+
+        # 2. Header and version labels at top
+        tk.Label(
+            up_win, 
+            text='🚀 Update Available!', 
+            font=('Segoe UI', 14, 'bold'), 
+            fg='#38bdf8', 
+            bg='#1e293b'
+        ).pack(side='top', pady=(12, 2))
+
+        ver_text = f"Installed: v{APP_VERSION}  →  Latest: v{latest_ver}"
+        tk.Label(
+            up_win, 
+            text=ver_text, 
+            font=('Segoe UI', 9, 'bold'), 
+            fg='#94a3b8', 
+            bg='#1e293b'
+        ).pack(side='top', pady=(0, 6))
+
+        tk.Label(
+            up_win, 
+            text="What's New in this Release:", 
+            font=('Segoe UI', 9, 'bold'), 
+            fg='#e2e8f0', 
+            bg='#1e293b', 
+            anchor='w'
+        ).pack(side='top', fill='x', padx=20, pady=(2, 4))
+
+        # 3. Changelog text in the remaining middle space with scrollbar
+        cl_frame = tk.Frame(up_win, bg='#0f172a', bd=1, relief='solid')
+        cl_frame.pack(side='top', fill='both', expand=True, padx=20, pady=(0, 4))
+
+        cl_scroll = tk.Scrollbar(cl_frame)
+        cl_scroll.pack(side='right', fill='y')
+
+        cl_text = tk.Text(
+            cl_frame, 
+            bg='#0f172a', 
+            fg='#cbd5e1', 
+            font=('Segoe UI', 9), 
+            wrap='word', 
+            relief='flat', 
+            height=4,
+            padx=8, 
+            pady=6,
+            yscrollcommand=cl_scroll.set
+        )
+        cl_scroll.config(command=cl_text.yview)
+        cl_text.insert('1.0', changelog.strip())
+        cl_text.configure(state='disabled')
+        cl_text.pack(side='left', fill='both', expand=True)
+
+        root.wait_window(up_win)
             
     if email:
-        valid, msg = verify_email(email)
+        valid, msg, update_info = verify_email(email)
         if valid:
+            if update_info.get('update_available'):
+                prompt_update(update_info)
             os.environ['JOBBOT_LAUNCHER_AUTH'] = email
             return True
             
@@ -2470,7 +2619,6 @@ def run_auth_check(root):
             import os; os._exit(0)
         dialog.protocol('WM_DELETE_WINDOW', on_auth_close)
 
-        
         tk.Label(dialog, text='Enter your Authorized Email:', font=('Segoe UI', 11)).pack(pady=10)
         entry = tk.Entry(dialog, width=40, font=('Segoe UI', 11))
         entry.pack(pady=5)
@@ -2488,8 +2636,11 @@ def run_auth_check(root):
         if not result_email[0]:
             return False # Cancelled
             
-        valid, msg = verify_email(result_email[0])
+        valid, msg, update_info = verify_email(result_email[0])
         if valid:
+            if update_info.get('update_available'):
+                prompt_update(update_info)
+                
             # Append to .env
             env_content = ''
             if os.path.exists(env_path):
@@ -2559,7 +2710,7 @@ def main():
         
     root.deiconify() # Show window after check
 
-    root.title("Job Bot Launcher")
+    root.title(f"Job Bot Launcher v{APP_VERSION}")
     root.configure(bg=COLORS["bg"])
     root.geometry("1900x780")
     configure_style(root)
