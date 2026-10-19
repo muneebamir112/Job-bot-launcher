@@ -30,6 +30,7 @@ def main():
         "--paths", os.path.join(root_dir, "scraper", "GlassD"),
         "--paths", os.path.join(root_dir, "scraper", "Hiring_cafe"),
         "--paths", os.path.join(root_dir, "scraper", "Jobgether"),
+        "--paths", os.path.join(root_dir, "Job-Bot"),
         # Explicitly declare hidden imports because jobbot_main.py imports them conditionally
         "--hidden-import", "fetch_jd",
         "--hidden-import", "ollama_generate",
@@ -40,6 +41,10 @@ def main():
         "--hidden-import", "scrape_form_questions",
         "--hidden-import", "google_doc_writer",
         "--collect-all", "googleapiclient",
+        "--collect-all", "pdfplumber",
+        "--collect-all", "pypdfium2",
+        "--add-data", f"{os.path.join(launcher_dir, 'credentials.json')};.",
+        "--add-data", f"{os.path.join(launcher_dir, 'token.json')};.",
         script_path
     ]
     
@@ -105,6 +110,13 @@ def main():
     # We also need to recreate the empty directories the bots expect
     os.makedirs(os.path.join(release_dir, "CVs"), exist_ok=True)
     os.makedirs(os.path.join(release_dir, "resume-bot", "profiles"), exist_ok=True)
+
+    # Copy Google Drive credentials and token into release package
+    for f in ["credentials.json", "token.json"]:
+        src_f = os.path.join(launcher_dir, f)
+        if os.path.exists(src_f):
+            shutil.copy2(src_f, os.path.join(release_dir, f))
+            print(f"[+] Bundled {f} into release package")
     
     # Copy the Glassdoor profile so the user stays logged in
     glassdoor_profiles_src = os.path.join(root_dir, "scraper", "GlassD", "profiles")

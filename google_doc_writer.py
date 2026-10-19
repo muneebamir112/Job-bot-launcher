@@ -12,7 +12,7 @@ def get_docs_service(service_account_file: str):
     if not os.path.exists(service_account_file):
         raise FileNotFoundError(f"Service account file not found: {service_account_file}")
     creds = Credentials.from_service_account_file(service_account_file, scopes=SCOPES)
-    return build("docs", "v1", credentials=creds)
+    return build("docs", "v1", credentials=creds, static_discovery=False, cache_discovery=False)
 
 def get_existing_companies(service_account_file: str, doc_id: str) -> set:
     """Returns a set of lowercased company names already present in the Google Doc."""

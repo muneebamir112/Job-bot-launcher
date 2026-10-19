@@ -9,10 +9,27 @@ from googleapiclient.http import MediaFileUpload
 # If modifying these scopes, delete token.json.
 SCOPES = ['https://www.googleapis.com/auth/drive']
 
-CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+if getattr(sys, 'frozen', False):
+    CURRENT_DIR = os.path.dirname(sys.executable)
+else:
+    CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(CURRENT_DIR)
-DEFAULT_CREDENTIALS = os.path.join(CURRENT_DIR, "credentials.json")
-DEFAULT_TOKEN = os.path.join(CURRENT_DIR, "token.json")
+
+def _find_file(filename):
+    candidates = [
+        os.path.join(CURRENT_DIR, filename),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), filename),
+        os.path.join(getattr(sys, '_MEIPASS', ''), filename) if hasattr(sys, '_MEIPASS') else '',
+        os.path.join(os.path.dirname(sys.executable), filename) if getattr(sys, 'frozen', False) else '',
+        os.path.join(BASE_DIR, "Job-bot-launcher", filename),
+    ]
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return os.path.join(CURRENT_DIR, filename)
+
+DEFAULT_CREDENTIALS = _find_file("credentials.json")
+DEFAULT_TOKEN = _find_file("token.json")
 DEFAULT_CVS_DIR = os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
 DEFAULT_FOLDER_NAME = "Job Bot CVs"
 DEFAULT_COVER_LETTER_FOLDER_NAME = "Job Bot Cover Letters"
@@ -61,7 +78,7 @@ def get_drive_service(credentials_path: str = DEFAULT_CREDENTIALS, token_path: s
         except Exception as e:
             print(f"[Drive] Warning: Could not save token.json: {e}")
 
-    return build('drive', 'v3', credentials=creds)
+    return build('drive', 'v3', credentials=creds, static_discovery=False, cache_discovery=False)
 
 
 def get_or_create_folder(service, folder_name: str = DEFAULT_FOLDER_NAME, parent_id: str = None) -> str:

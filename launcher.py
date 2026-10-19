@@ -68,7 +68,7 @@ else:
 # actual rendered resumes end up; used here only to check whether one
 # already exists for a company (see ResumeBotPanel._run).
 CVS_DIR = os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
-APP_VERSION = "2.0.0"
+APP_VERSION = "1.0.0"
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(CURRENT_DIR, ".env"))
@@ -765,6 +765,17 @@ class ResumeBotPanel(BotPanel):
         text = re.sub(r"[^a-zA-Z0-9]+", "_", text).strip("_").lower()
         return text[:60] or "job"
 
+    @staticmethod
+    def _normalize_company(name):
+        """Normalizes company names for deduplication across different jobs."""
+        if not name:
+            return ""
+        c = str(name).strip().lower()
+        c = re.sub(r'[\.,\-_/\\()&]', ' ', c)
+        c = re.sub(r'\b(inc|incorporated|llc|ltd|limited|corp|corporation|co|company|group|technologies|tech|solutions|services|holdings|enterprises|pvt|plc)\b', '', c)
+        c = re.sub(r'\s+', ' ', c).strip()
+        return c if c else str(name).strip().lower()
+
     # Column I - written "Generated" once a resume for that row's job exists.
     RESUME_COLUMN = 9
 
@@ -954,8 +965,26 @@ class ResumeBotPanel(BotPanel):
                 start = self._first_profile_col(headers)
                 profile_names = headers[start:start + num_profiles]
 
+            # Track which companies each profile ALREADY has a resume for in the sheet
+            company_done_by_profile = {p: set() for p in profile_names}
+            for comp, _, r_idx, r_data in jobs:
+                norm_c = self._normalize_company(comp)
+                if not norm_c or norm_c in ("unknown", "n/a", "na", "-"):
+                    continue
+                for profile_name in profile_names:
+                    try:
+                        h_idx = headers.index(profile_name)
+                        if h_idx < len(r_data):
+                            st = r_data[h_idx].strip().lower()
+                            if ("resume" in st) or (st in ("applied", "submitted", "generated", "human attention")):
+                                company_done_by_profile[profile_name].add(norm_c)
+                    except ValueError:
+                        pass
+
             todo = []
+            queued_companies_by_profile = {p: set() for p in profile_names}
             for company, link, row, row_data in jobs:
+                norm_c = self._normalize_company(company)
                 for profile_name in profile_names:
                     try:
                         header_idx = headers.index(profile_name)
@@ -972,10 +1001,17 @@ class ResumeBotPanel(BotPanel):
                     except ValueError:
                         continue
                         
+                    # Skip if this profile already has or has queued a resume for this company
+                    if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
+                        if norm_c in company_done_by_profile.get(profile_name, set()) or norm_c in queued_companies_by_profile.get(profile_name, set()):
+                            continue
+
                     pdf_path = os.path.join(CVS_DIR, f"{profile_name} - {company}.pdf")
                     pdf_nested = os.path.join(CVS_DIR, profile_name, f"{profile_name} - {company}.pdf")
                     if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested)):
                         todo.append((company, link, row, profile_name, col_index, row_data))
+                        if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
+                            queued_companies_by_profile[profile_name].add(norm_c)
 
             if todo:
                 self._append_log(
@@ -1309,10 +1345,28 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     start = self._first_profile_col(headers)
                     profile_names = headers[start:start + num_profiles]
 
+                # Track which companies each profile ALREADY has a cover letter for in the sheet
+                cl_done_by_profile = {p: set() for p in profile_names}
+                for comp, _, r_idx, r_data in jobs:
+                    norm_c = self._normalize_company(comp)
+                    if not norm_c or norm_c in ("unknown", "n/a", "na", "-"):
+                        continue
+                    for profile_name in profile_names:
+                        try:
+                            h_idx = headers.index(profile_name)
+                            if h_idx < len(r_data):
+                                st = r_data[h_idx].strip().lower()
+                                if ("cover letter" in st) or (st in ("applied", "submitted")):
+                                    cl_done_by_profile[profile_name].add(norm_c)
+                        except ValueError:
+                            pass
+
                 todo = []
+                cl_queued_by_profile = {p: set() for p in profile_names}
                 COVERLETTER_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "Cover Letters"))
                 ALT_COVERLETTER_DIR = os.path.join(BASE_DIR, "CVs")
                 for company, link, row, row_data in jobs:
+                    norm_c = self._normalize_company(company)
                     for profile_name in profile_names:
                         try:
                             header_idx = headers.index(profile_name)
@@ -1325,6 +1379,11 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         except ValueError:
                             col_index = None
 
+                        # Skip if this profile already has or has queued a cover letter for this company
+                        if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
+                            if norm_c in cl_done_by_profile.get(profile_name, set()) or norm_c in cl_queued_by_profile.get(profile_name, set()):
+                                continue
+
                         # Check if cover letter already exists on disk
                         pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
                         pdf_nested = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
@@ -1332,6 +1391,8 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         alt_nested = os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
                         if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested) or os.path.exists(alt_path) or os.path.exists(alt_nested)):
                             todo.append((company, link, row, profile_name, col_index, row_data))
+                            if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
+                                cl_queued_by_profile[profile_name].add(norm_c)
 
                 if todo:
                     self._append_log(
