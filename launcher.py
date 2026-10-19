@@ -607,6 +607,20 @@ class ResumeBotPanel(BotPanel):
                     
                     self.active_profiles.append(prof_name)
                     
+                    # Create local CV directory for this profile
+                    prof_cv_dir = os.path.join(CVS_DIR, prof_name)
+                    os.makedirs(prof_cv_dir, exist_ok=True)
+
+                    # Create Google Drive folder for this profile automatically
+                    try:
+                        if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                            import google_drive_uploader
+                            drive_service = google_drive_uploader.get_drive_service()
+                            drive_folder_id = google_drive_uploader.get_or_create_profile_folder(drive_service, prof_name)
+                            self._append_log(f"\n[Drive] Created/verified Drive folder for '{prof_name}'!\n")
+                    except Exception as drive_err:
+                        self._append_log(f"\n[Drive Warning] Could not create Drive folder for '{prof_name}': {drive_err}\n")
+
                     # Check sheet headers
                     headers_lower = [str(h).strip().lower() for h in headers]
                     if prof_name.lower() not in headers_lower:
@@ -958,7 +972,8 @@ class ResumeBotPanel(BotPanel):
                         continue
                         
                     pdf_path = os.path.join(CVS_DIR, f"{profile_name} - {company}.pdf")
-                    if not os.path.exists(pdf_path):
+                    pdf_nested = os.path.join(CVS_DIR, profile_name, f"{profile_name} - {company}.pdf")
+                    if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested)):
                         todo.append((company, link, row, profile_name, col_index))
 
             if todo:
@@ -1070,10 +1085,10 @@ class ResumeBotPanel(BotPanel):
                     try:
                         if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
                             import google_drive_uploader
-                            drive_service = google_drive_uploader.get_drive_service()
-                            drive_folder_id = google_drive_uploader.get_or_create_folder(drive_service)
-                            google_drive_uploader.upload_file_to_drive(drive_service, pdf_path, drive_folder_id)
-                            self._append_log(f"  [Drive] Synced {profile_name} - {company}.pdf to Google Drive\n")
+                            target_pdf = pdf_path if os.path.exists(pdf_path) else os.path.join(CVS_DIR, profile_name, f"{profile_name} - {company}.pdf")
+                            if os.path.exists(target_pdf):
+                                google_drive_uploader.upload_single_cv(target_pdf, profile_name=profile_name)
+                                self._append_log(f"  [Drive] Synced {profile_name} - {company}.pdf to Google Drive ({profile_name} folder)\n")
                     except Exception as drive_err:
                         self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
                     
@@ -1277,7 +1292,8 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     for profile_name in profile_names:
                         # Don't check the Google sheet for cover letter status, just check the file!
                         pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
-                        if not os.path.exists(pdf_path):
+                        pdf_nested = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
+                        if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested)):
                             todo.append((company, link, row, profile_name))
 
                 if todo:
@@ -1348,11 +1364,12 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         try:
                             if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
                                 import google_drive_uploader
-                                cl_pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
-                                drive_service = google_drive_uploader.get_drive_service()
-                                drive_folder_id = google_drive_uploader.get_or_create_folder(drive_service)
-                                google_drive_uploader.upload_file_to_drive(drive_service, cl_pdf_path, drive_folder_id)
-                                self._append_log(f"  [Drive] Synced Cover Letter - {profile_name} - {company}.pdf to Google Drive\n")
+                                cl_target = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
+                                if not os.path.exists(cl_target):
+                                    cl_target = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
+                                if os.path.exists(cl_target):
+                                    google_drive_uploader.upload_single_cv(cl_target, profile_name=profile_name)
+                                    self._append_log(f"  [Drive] Synced Cover Letter - {profile_name} - {company}.pdf to Google Drive ({profile_name} folder)\n")
                         except Exception as drive_err:
                             self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
                     

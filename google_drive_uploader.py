@@ -152,39 +152,75 @@ def upload_file_to_drive(service, file_path: str, folder_id: str, overwrite: boo
     return created
 
 
-def upload_single_cv(file_path: str, folder_name: str = DEFAULT_FOLDER_NAME) -> dict:
-    """Uploads a single CV or cover letter to the Google Drive folder."""
+def infer_profile_name(file_path_or_name: str) -> str:
+    """Infers candidate profile name from folder structure or filename."""
+    # Check parent folder name first (e.g., CVs/Brian Moore/0x.pdf)
+    parent_dir = os.path.basename(os.path.dirname(os.path.abspath(file_path_or_name)))
+    if parent_dir and parent_dir.lower() not in ("cvs", "cvs-old", "cover letters"):
+        return parent_dir
+
+    fname = os.path.basename(file_path_or_name).replace(".pdf", "").strip()
+    if fname.startswith("Cover Letter - "):
+        parts = fname[len("Cover Letter - "):].split(" - ")
+        if len(parts) >= 2:
+            return parts[0].strip()
+    elif " - " in fname:
+        parts = fname.split(" - ")
+        return parts[0].strip()
+    return "General"
+
+
+def get_or_create_profile_folder(service, profile_name: str, root_folder_name: str = DEFAULT_FOLDER_NAME) -> str:
+    """Gets or creates a profile-specific subfolder (e.g. 'Job Bot CVs/Brian Moore')."""
+    root_id = get_or_create_folder(service, folder_name=root_folder_name)
+    clean_profile = profile_name.strip() if profile_name else "General"
+    profile_folder_id = get_or_create_folder(service, folder_name=clean_profile, parent_id=root_id)
+    return profile_folder_id
+
+
+def upload_single_cv(file_path: str, profile_name: str = None, folder_name: str = DEFAULT_FOLDER_NAME) -> dict:
+    """Uploads a single CV or cover letter into its profile's subfolder on Google Drive."""
     service = get_drive_service()
-    folder_id = get_or_create_folder(service, folder_name=folder_name)
-    return upload_file_to_drive(service, file_path, folder_id, overwrite=True)
+    if not profile_name:
+        profile_name = infer_profile_name(file_path)
+    
+    # Store inside the profile's subfolder under root
+    target_folder_id = get_or_create_profile_folder(service, profile_name, root_folder_name=folder_name)
+    return upload_file_to_drive(service, file_path, target_folder_id, overwrite=True)
 
 
 def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = DEFAULT_FOLDER_NAME, overwrite: bool = True):
-    """Scans the CVs directory and uploads all PDF files to the Google Drive folder."""
+    """Scans the CVs directory (both flat and subfolders) and organizes all CVs into profile subfolders on Drive."""
     if not os.path.exists(cvs_dir):
         print(f"[Drive] CV directory does not exist: {cvs_dir}")
         return 0
 
-    pdf_files = [f for f in os.listdir(cvs_dir) if f.lower().endswith('.pdf')]
-    if not pdf_files:
+    all_pdfs = []
+    for root, _, files in os.walk(cvs_dir):
+        for f in files:
+            if f.lower().endswith('.pdf'):
+                all_pdfs.append(os.path.join(root, f))
+
+    if not all_pdfs:
         print(f"[Drive] No PDF files found in {cvs_dir}")
         return 0
 
-    print(f"[Drive] Found {len(pdf_files)} PDF file(s) in {cvs_dir}. Connecting to Google Drive...")
+    print(f"[Drive] Found {len(all_pdfs)} PDF file(s) in {cvs_dir}. Organizing on Google Drive by profile...")
     service = get_drive_service()
-    folder_id = get_or_create_folder(service, folder_name=folder_name)
 
     success_count = 0
-    for idx, fname in enumerate(pdf_files, start=1):
-        full_path = os.path.join(cvs_dir, fname)
-        print(f"[{idx}/{len(pdf_files)}] Uploading {fname}...")
+    for idx, full_path in enumerate(all_pdfs, start=1):
+        fname = os.path.basename(full_path)
+        profile_name = infer_profile_name(full_path)
+        print(f"[{idx}/{len(all_pdfs)}] [{profile_name}] Uploading {fname}...")
         try:
-            upload_file_to_drive(service, full_path, folder_id, overwrite=overwrite)
+            target_folder_id = get_or_create_profile_folder(service, profile_name, root_folder_name=folder_name)
+            upload_file_to_drive(service, full_path, target_folder_id, overwrite=overwrite)
             success_count += 1
         except Exception as e:
-            print(f"  [Error] Failed to upload {fname}: {e}")
+            print(f"  [Error] Failed to upload {fname} for {profile_name}: {e}")
 
-    print(f"\n[Drive] Done! Successfully uploaded {success_count}/{len(pdf_files)} files to Google Drive folder '{folder_name}'.")
+    print(f"\n[Drive] Done! Successfully organized {success_count}/{len(all_pdfs)} files into profile folders in '{folder_name}'.")
     return success_count
 
 
