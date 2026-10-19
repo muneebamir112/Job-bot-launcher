@@ -15,6 +15,8 @@ DEFAULT_CREDENTIALS = os.path.join(CURRENT_DIR, "credentials.json")
 DEFAULT_TOKEN = os.path.join(CURRENT_DIR, "token.json")
 DEFAULT_CVS_DIR = os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
 DEFAULT_FOLDER_NAME = "Job Bot CVs"
+DEFAULT_COVER_LETTER_FOLDER_NAME = "Job Bot Cover Letters"
+DEFAULT_COVER_LETTERS_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "Cover Letters"))
 
 
 def get_drive_service(credentials_path: str = DEFAULT_CREDENTIALS, token_path: str = DEFAULT_TOKEN):
@@ -64,9 +66,11 @@ def get_drive_service(credentials_path: str = DEFAULT_CREDENTIALS, token_path: s
 
 def get_or_create_folder(service, folder_name: str = DEFAULT_FOLDER_NAME, parent_id: str = None) -> str:
     """Finds an existing folder by name on Google Drive or creates it if it doesn't exist."""
-    query = f"mimeType = 'application/vnd.google-apps.folder' and name = '{folder_name}' and trashed = false"
     if parent_id:
-        query += f" and '{parent_id}' in parents"
+        query = f"mimeType = 'application/vnd.google-apps.folder' and name = '{folder_name}' and '{parent_id}' in parents and trashed = false"
+    else:
+        alt_name = folder_name.replace("Job Bot ", "").strip()
+        query = f"mimeType = 'application/vnd.google-apps.folder' and (name = '{folder_name}' or name = '{alt_name}') and trashed = false"
 
     try:
         results = service.files().list(
@@ -189,6 +193,16 @@ def upload_single_cv(file_path: str, profile_name: str = None, folder_name: str 
     return upload_file_to_drive(service, file_path, target_folder_id, overwrite=True)
 
 
+def upload_single_cover_letter(file_path: str, profile_name: str = None, folder_name: str = DEFAULT_COVER_LETTER_FOLDER_NAME) -> dict:
+    """Uploads a single cover letter into its profile's subfolder under 'Job Bot Cover Letters' on Google Drive."""
+    service = get_drive_service()
+    if not profile_name:
+        profile_name = infer_profile_name(file_path)
+    
+    target_folder_id = get_or_create_profile_folder(service, profile_name, root_folder_name=folder_name)
+    return upload_file_to_drive(service, file_path, target_folder_id, overwrite=True)
+
+
 def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = DEFAULT_FOLDER_NAME, overwrite: bool = True):
     """Scans the CVs directory (both flat and subfolders) and organizes all CVs into profile subfolders on Drive."""
     if not os.path.exists(cvs_dir):
@@ -224,7 +238,48 @@ def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = DEFAULT_FO
     return success_count
 
 
+def upload_all_cover_letters(cover_letters_dir: str = DEFAULT_COVER_LETTERS_DIR, folder_name: str = DEFAULT_COVER_LETTER_FOLDER_NAME, overwrite: bool = True):
+    """Scans Cover Letters directory (both flat and subfolders) and organizes all into profile subfolders on Drive."""
+    if not os.path.exists(cover_letters_dir):
+        print(f"[Drive] Cover letters directory does not exist: {cover_letters_dir}")
+        return 0
+
+    all_pdfs = []
+    for root, _, files in os.walk(cover_letters_dir):
+        for f in files:
+            if f.lower().endswith('.pdf'):
+                all_pdfs.append(os.path.join(root, f))
+
+    if not all_pdfs:
+        print(f"[Drive] No PDF files found in {cover_letters_dir}")
+        return 0
+
+    print(f"[Drive] Found {len(all_pdfs)} Cover Letter PDF(s) in {cover_letters_dir}. Organizing on Drive...")
+    service = get_drive_service()
+
+    success_count = 0
+    for idx, full_path in enumerate(all_pdfs, start=1):
+        fname = os.path.basename(full_path)
+        profile_name = infer_profile_name(full_path)
+        print(f"[{idx}/{len(all_pdfs)}] [{profile_name}] Uploading {fname} to '{folder_name}/{profile_name}'...")
+        try:
+            target_folder_id = get_or_create_profile_folder(service, profile_name, root_folder_name=folder_name)
+            upload_file_to_drive(service, full_path, target_folder_id, overwrite=overwrite)
+            success_count += 1
+        except Exception as e:
+            print(f"  [Error] Failed to upload {fname} for {profile_name}: {e}")
+
+    print(f"\n[Drive] Done! Successfully organized {success_count}/{len(all_pdfs)} cover letters into profile folders in '{folder_name}'.")
+    return success_count
+
+
 if __name__ == "__main__":
-    cvs_directory = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CVS_DIR
-    target_folder = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_FOLDER_NAME
-    upload_all_cvs(cvs_dir=cvs_directory, folder_name=target_folder)
+    mode = sys.argv[1].lower() if len(sys.argv) > 1 else "cvs"
+    if mode in ("cover_letters", "cl", "coverletter"):
+        cl_dir = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_COVER_LETTERS_DIR
+        cl_folder = sys.argv[3] if len(sys.argv) > 3 else DEFAULT_COVER_LETTER_FOLDER_NAME
+        upload_all_cover_letters(cover_letters_dir=cl_dir, folder_name=cl_folder)
+    else:
+        cvs_directory = sys.argv[1] if len(sys.argv) > 1 and not sys.argv[1].startswith("-") else DEFAULT_CVS_DIR
+        target_folder = sys.argv[2] if len(sys.argv) > 2 else DEFAULT_FOLDER_NAME
+        upload_all_cvs(cvs_dir=cvs_directory, folder_name=target_folder)

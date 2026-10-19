@@ -1203,6 +1203,21 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     
                     self.active_profiles.append(prof_name)
                     
+                    # Create local folder for this profile in Cover Letters
+                    cl_base_dir = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "Cover Letters"))
+                    prof_cl_dir = os.path.join(cl_base_dir, prof_name)
+                    os.makedirs(prof_cl_dir, exist_ok=True)
+
+                    # Create Google Drive folder for this profile under Cover Letters automatically
+                    try:
+                        if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                            import google_drive_uploader
+                            drive_service = google_drive_uploader.get_drive_service()
+                            drive_folder_id = google_drive_uploader.get_or_create_profile_folder(drive_service, prof_name, root_folder_name="Job Bot Cover Letters")
+                            self._append_log(f"\n[Drive] Created/verified Cover Letter Drive folder for '{prof_name}'!\n")
+                    except Exception as drive_err:
+                        self._append_log(f"\n[Drive Warning] Could not create Cover Letter Drive folder for '{prof_name}': {drive_err}\n")
+
                     # Check sheet headers
                     headers_lower = [str(h).strip().lower() for h in headers]
                     if prof_name.lower() not in headers_lower:
@@ -1287,13 +1302,16 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     profile_names = headers[start:start + num_profiles]
 
                 todo = []
-                COVERLETTER_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
+                COVERLETTER_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "Cover Letters"))
+                ALT_COVERLETTER_DIR = os.path.join(BASE_DIR, "CVs")
                 for company, link, row, row_data in jobs:
                     for profile_name in profile_names:
                         # Don't check the Google sheet for cover letter status, just check the file!
                         pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
                         pdf_nested = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
-                        if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested)):
+                        alt_path = os.path.join(ALT_COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
+                        alt_nested = os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
+                        if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested) or os.path.exists(alt_path) or os.path.exists(alt_nested)):
                             todo.append((company, link, row, profile_name))
 
                 if todo:
@@ -1364,12 +1382,19 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         try:
                             if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
                                 import google_drive_uploader
-                                cl_target = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
-                                if not os.path.exists(cl_target):
-                                    cl_target = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
-                                if os.path.exists(cl_target):
-                                    google_drive_uploader.upload_single_cv(cl_target, profile_name=profile_name)
-                                    self._append_log(f"  [Drive] Synced Cover Letter - {profile_name} - {company}.pdf to Google Drive ({profile_name} folder)\n")
+                                cl_target = None
+                                for cand_path in [
+                                    os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf"),
+                                    os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf"),
+                                    os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf"),
+                                    os.path.join(ALT_COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf"),
+                                ]:
+                                    if os.path.exists(cand_path):
+                                        cl_target = cand_path
+                                        break
+                                if cl_target and os.path.exists(cl_target):
+                                    google_drive_uploader.upload_single_cover_letter(cl_target, profile_name=profile_name)
+                                    self._append_log(f"  [Drive] Synced Cover Letter - {profile_name} - {company}.pdf to Google Drive ('Job Bot Cover Letters/{profile_name}' folder)\n")
                         except Exception as drive_err:
                             self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
                     
