@@ -40,6 +40,7 @@ def main():
         "--hidden-import", "jobgether_scraper",
         "--hidden-import", "scrape_form_questions",
         "--hidden-import", "google_doc_writer",
+        "--hidden-import", "question_extractor",
         "--collect-all", "googleapiclient",
         "--collect-all", "pdfplumber",
         "--collect-all", "pypdfium2",

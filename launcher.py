@@ -1666,7 +1666,7 @@ class ScraperPanel(tk.Frame):
         opt_frame.pack(pady=(2, 6))
         self.scrape_questions_var = tk.BooleanVar(value=True)
         tk.Checkbutton(
-            opt_frame, text="Also scrape application form questions to Google Doc",
+            opt_frame, text="Auto-scrape form questions in same visit (creates per-job Google Docs)",
             variable=self.scrape_questions_var, fg=COLORS["text"], bg=COLORS["panel_bg"],
             selectcolor=COLORS["input_bg"], activebackground=COLORS["panel_bg"],
             activeforeground=COLORS["text"], font=("Segoe UI", 9)
@@ -2136,27 +2136,6 @@ class ScraperPanel(tk.Frame):
             if not self._stop_requested and failed:
                 self._log(f"  {title} | {location}: {', '.join(failed)} did not finish cleanly\n")
 
-            # Incrementally sync questions to Google Doc for any newly discovered jobs from this keyword
-            if not self._stop_requested and getattr(self, "scrape_questions_var", None) and self.scrape_questions_var.get():
-                self._log(f"  [Questions] Checking & syncing newly scraped jobs for '{title}' to Google Doc...\n")
-                q_cwd = CURRENT_DIR
-                if getattr(sys, 'frozen', False):
-                    q_cmd = [sys.executable, "scrape_form_questions", title]
-                else:
-                    q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py"), title]
-                self._run_platform("Questions", q_cwd, q_cmd)
-
-        # Final pass for Question Scraper if enabled
-        if not self._stop_requested and getattr(self, "scrape_questions_var", None) and self.scrape_questions_var.get():
-            self._log("\n=== Final Question Scraper Pass: Ensuring all sheet jobs are synced ===\n")
-            self._set_status("Scraping Form Questions...", COLORS["running"])
-            q_cwd = CURRENT_DIR
-            if getattr(sys, 'frozen', False):
-                q_cmd = [sys.executable, "scrape_form_questions"]
-            else:
-                q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
-
-            self._run_platform("Questions", q_cwd, q_cmd)
 
         end_label = "stopped" if self._stop_requested else "finished"
         elapsed = format_duration(datetime.now() - run_start)
