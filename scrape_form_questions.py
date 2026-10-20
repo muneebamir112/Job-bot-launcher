@@ -32,8 +32,7 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1mAc6E1jyafvlBZ6pWnoEykKatuJJePV1YJwTzi87Qg8")
-GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID", "1ho1Og5uYPHweKDe1ymSFdwS63tX95cr9CHWxsvemMZI")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1FsPR9t-BB1GZ6kWfANnrDfq4p9XobDuA1tVB4D2sJDg")
 SERVICE_ACCOUNT_FILE = os.path.join(CURRENT_DIR, "service_account.json")
 if not os.path.exists(SERVICE_ACCOUNT_FILE):
     alt_sa = os.path.join(BASE_DIR, "service_account.json")
@@ -54,10 +53,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger("QuestionScraper")
 
-# Import the Google Doc Writer
+# Import the Google Doc / Drive Writer
 import google_doc_writer
 
-# Standard identity keywords that are not custom employer questions
+# Standard basic contact identity keywords (not custom employer questions)
 EXCLUDED_BASIC_KEYWORDS = [
     'first name', 'given name', 'last name', 'family name', 'middle name',
     'email', 'phone', 'phone number', 'mobile', 'address', 'street address',
@@ -257,7 +256,6 @@ async def extract_form_questions(page) -> list:
                     qText = clean(qText);
                     if (!qText || qText.length < 5 || localSeen.has(qText.toLowerCase())) continue;
 
-                    // Check if this combobox has visible options strictly associated with it
                     let opts = [];
                     if (tf.getAttribute('role') === 'combobox') {
                         let listbox = null;
@@ -280,7 +278,6 @@ async def extract_form_questions(page) -> list:
                         }
                     }
 
-                    // Never attach phone country dial codes as combobox options
                     if (isCountryCodeList(opts)) {
                         opts = [];
                     }
@@ -354,20 +351,173 @@ async def extract_form_questions(page) -> list:
 
     return cleaned
 
+
+async def find_next_page_button(page):
+    """
+    Scans the page and all frames for a 'Next', 'Continue', or 'Proceed' button
+    to advance to the next step of a multi-page application form.
+    Avoids 'Submit', 'Apply', or 'Back' buttons.
+    """
+    next_selectors = [
+        "[data-automation-id='nextButton']",
+        "[data-automation-id='bottom-navigation-next-button']",
+        "button[aria-label*='Next' i]",
+        "button:has-text('Next Step')",
+        "button:has-text('Next Page')",
+        "button:has-text('Save & Continue')",
+        "button:has-text('Save and Continue')",
+        "button:has-text('Save and continue')",
+        "button:has-text('Next')",
+        "button:has-text('Continue')",
+        "button:has-text('Proceed')",
+        "input[type='submit'][value*='Next' i]",
+        "input[type='button'][value*='Next' i]",
+        "input[type='button'][value*='Continue' i]",
+        "a:has-text('Next Step')",
+        "a:has-text('Save & Continue')",
+        "a:has-text('Save and Continue')",
+        "a:has-text('Continue')"
+    ]
+    
+    forbidden_terms = ['submit', 'finish', 'complete', 'review and submit', 'back', 'previous', 'cancel', 'discard']
+
+    for frame in page.frames:
+        for sel in next_selectors:
+            try:
+                elements = await frame.locator(sel).all()
+                for el in elements:
+                    if await el.is_visible() and await el.is_enabled():
+                        text = (await el.inner_text() or await el.get_attribute("value") or "").strip().lower()
+                        if any(term in text for term in forbidden_terms):
+                            continue
+                        if 'next' in text or 'continue' in text or 'proceed' in text or 'next' in sel.lower():
+                            return {"element": el, "text": text or sel}
+            except Exception:
+                continue
+    return None
+
+
+async def fill_required_fields_if_needed(page):
+    """
+    If a multi-step form has required basic fields on early pages that prevent advancing,
+    fills standard safe placeholder values so the form can transition to subsequent question pages.
+    """
+    for frame in page.frames:
+        try:
+            inputs = await frame.locator("input[required], input[aria-required='true'], textarea[required]").all()
+            for inp in inputs:
+                try:
+                    if not await inp.is_visible():
+                        continue
+                    val = (await inp.input_value() or "").strip()
+                    if val:
+                        continue
+                    
+                    inp_type = (await inp.get_attribute("type") or "text").lower()
+                    name = (await inp.get_attribute("name") or "").lower()
+                    inp_id = (await inp.get_attribute("id") or "").lower()
+                    
+                    if inp_type == "email" or "email" in name or "email" in inp_id:
+                        await inp.fill("applicant.jobbot@gmail.com")
+                    elif inp_type == "tel" or "phone" in name or "phone" in inp_id:
+                        await inp.fill("5551234567")
+                    elif "first" in name or "first" in inp_id:
+                        await inp.fill("Applicant")
+                    elif "last" in name or "last" in inp_id:
+                        await inp.fill("Candidate")
+                    elif "zip" in name or "postal" in name:
+                        await inp.fill("90210")
+                    elif "city" in name:
+                        await inp.fill("New York")
+                    else:
+                        await inp.fill("N/A")
+                    await asyncio.sleep(0.1)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
+
+async def scrape_all_pages_questions(active_page, context, max_pages=7) -> list:
+    """
+    Crawls multi-page job application forms, scraping questions across each page.
+    Advances using 'Next', 'Continue', or 'Save & Continue' until the application finishes.
+    """
+    all_questions = []
+    seen_prompts = set()
+    current_page = active_page
+
+    for page_num in range(1, max_pages + 1):
+        await dismiss_popups(current_page)
+        await asyncio.sleep(1.5)
+
+        # 1. Extract questions on the current page
+        page_questions = await extract_form_questions(current_page)
+        new_count = 0
+        for q in page_questions:
+            prompt_key = q["question"].strip().lower()
+            if prompt_key not in seen_prompts:
+                seen_prompts.add(prompt_key)
+                all_questions.append(q)
+                new_count += 1
+
+        logger.info(f"    Page {page_num}: Found {len(page_questions)} question(s) ({new_count} new).")
+
+        # If on page 2+ and no new questions were found, the form either didn't advance or reached the end
+        if page_num > 1 and new_count == 0:
+            logger.info(f"    -> No new questions discovered on Page {page_num}. Ending multi-page crawl.")
+            break
+
+        # 2. Check for next page trigger
+        next_btn = await find_next_page_button(current_page)
+        if not next_btn:
+            if page_num > 1:
+                logger.info(f"    -> Reached final page ({page_num}).")
+            break
+
+        # 3. Fill required fields if needed so browser allows clicking next
+        await fill_required_fields_if_needed(current_page)
+        await asyncio.sleep(0.5)
+
+        # 4. Advance to next page
+        btn_label = next_btn['text']
+        logger.info(f"    -> Multi-page form detected. Clicking '{btn_label}' to reach Page {page_num + 1}...")
+        
+        initial_pages = len(context.pages)
+        try:
+            await next_btn["element"].click(timeout=5000)
+            await asyncio.sleep(3)
+            
+            # Check if a new tab opened
+            if len(context.pages) > initial_pages:
+                current_page = context.pages[-1]
+                await current_page.wait_for_load_state("domcontentloaded", timeout=10000)
+                logger.info(f"    -> Switched to newly opened page tab.")
+            else:
+                await current_page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception as click_err:
+            logger.info(f"    -> Could not advance past Page {page_num}: {click_err}")
+            break
+
+    return all_questions
+
+
 async def run_scraper():
     logger.info("==========================================")
-    logger.info(" Starting Standalone Form Questions Scraper")
+    logger.info("  Form Questions Scraper (Per-Job Docs)   ")
     logger.info("==========================================")
-    logger.info(f"Target Google Doc ID: {GOOGLE_DOC_ID}")
     logger.info(f"Source Google Sheet ID: {GOOGLE_SHEET_ID}")
     
-    # 1. Fetch Existing Companies from Google Doc to skip duplicates
-    existing_companies = set()
+    # 1. Initialize Google Drive & fetch existing question docs to prevent duplicates
+    drive_service = None
+    existing_docs = {}
     try:
-        existing_companies = google_doc_writer.get_existing_companies(SERVICE_ACCOUNT_FILE, GOOGLE_DOC_ID)
-        logger.info(f"Google Doc currently contains {len(existing_companies)} scraped company record(s).")
+        drive_service = google_doc_writer.get_drive_service()
+        folder_id = google_doc_writer.get_or_create_questions_folder(drive_service)
+        existing_docs = google_doc_writer.get_existing_question_docs(drive_service, folder_id)
+        logger.info(f"Found {len(existing_docs)} existing per-job Google Doc(s) in Drive folder.")
     except Exception as e:
-        logger.warning(f"Could not read existing companies from Doc (will proceed): {e}")
+        logger.warning(f"Could not connect to Google Drive ({e}). Will proceed with direct creation.")
 
     # 2. Connect to Google Sheets and read "Jobs" tab
     try:
@@ -390,14 +540,17 @@ async def run_scraper():
     headers = rows[0]
     data_rows = rows[1:]
 
-    # Locate Company and Link columns
+    # Locate Company, Title, and Link columns
     company_col_idx = 1 # Column B (default)
+    title_col_idx = 2   # Column C (default)
     link_col_idx = 5    # Column F (default)
 
     for i, h in enumerate(headers):
         h_lower = str(h).strip().lower()
         if "company" in h_lower:
             company_col_idx = i
+        elif "title" in h_lower:
+            title_col_idx = i
         elif "link" in h_lower or "url" in h_lower:
             link_col_idx = i
 
@@ -406,22 +559,25 @@ async def run_scraper():
         if len(r) <= max(company_col_idx, link_col_idx):
             continue
         comp = r[company_col_idx].strip()
+        title = r[title_col_idx].strip() if title_col_idx < len(r) and r[title_col_idx].strip() else "Job"
         link = r[link_col_idx].strip()
         
         if comp and link and link.startswith("http"):
-            jobs_to_process.append((comp, link, r_idx))
+            jobs_to_process.append((comp, title, link, r_idx))
 
     logger.info(f"Found {len(jobs_to_process)} total job links in the Google Sheet.")
     
-    # Filter out companies already scraped into the Google Doc
-    pending_jobs = [
-        (c, l, r) for c, l, r in jobs_to_process
-        if c.lower() not in existing_companies
-    ]
-    logger.info(f"{len(pending_jobs)} job(s) pending question extraction (unscraped).\n")
+    # Filter out jobs that already have a dedicated Google Doc
+    pending_jobs = []
+    for comp, title, link, r_idx in jobs_to_process:
+        target_name = f"{comp} - {title}".strip().lower()
+        if target_name not in existing_docs:
+            pending_jobs.append((comp, title, link, r_idx))
+
+    logger.info(f"{len(pending_jobs)} job(s) pending question extraction.\n")
 
     if not pending_jobs:
-        logger.info("All companies from the sheet are already present in the Google Doc! Nothing to do.")
+        logger.info("All jobs from the sheet already have their dedicated Google Docs! Nothing to do.")
         return
 
     # 3. Launch stealth browser and process jobs
@@ -435,8 +591,9 @@ async def run_scraper():
         total_scraped = 0
         total_failed = 0
 
-        for idx, (company, url, row_num) in enumerate(pending_jobs, start=1):
-            logger.info(f"\n--- [{idx}/{len(pending_jobs)}] {company} (Row {row_num}) ---")
+        for idx, (company, title, url, row_num) in enumerate(pending_jobs, start=1):
+            doc_target_name = f"{company} - {title}"
+            logger.info(f"\n--- [{idx}/{len(pending_jobs)}] {doc_target_name} (Row {row_num}) ---")
             logger.info(f"URL: {url}")
             
             page = await context.new_page()
@@ -447,16 +604,16 @@ async def run_scraper():
                 await asyncio.sleep(3)
                 await dismiss_popups(page)
 
-                # Attempt to reach the active application form if on a description page
+                # Attempt to reach active application form if on landing / description page
                 active_page = await click_apply_button_if_present(page, context)
                 await asyncio.sleep(3)
                 await dismiss_popups(active_page)
 
-                # Extract questions from form and embedded iframes
-                questions = await extract_form_questions(active_page)
+                # Scrape questions across all pages of the application form
+                questions = await scrape_all_pages_questions(active_page, context)
                 
                 if questions:
-                    logger.info(f"  [+] Found {len(questions)} question(s) for {company}:")
+                    logger.info(f"  [+] Found {len(questions)} total question(s) for {doc_target_name}:")
                     for q_i, q_item in enumerate(questions[:5], start=1):
                         prompt = q_item.get("question", "") if isinstance(q_item, dict) else str(q_item)
                         opts = q_item.get("options", []) if isinstance(q_item, dict) else []
@@ -465,22 +622,24 @@ async def run_scraper():
                     if len(questions) > 5:
                         logger.info(f"      ... and {len(questions) - 5} more questions.")
 
-                    # Append to Google Doc in real time
-                    success = google_doc_writer.append_company_questions(
-                        SERVICE_ACCOUNT_FILE, GOOGLE_DOC_ID, company, questions
+                    # Create dedicated Google Doc named '{company} - {job_title}'
+                    doc_res = google_doc_writer.create_job_question_doc(
+                        company, title, url, questions, drive_service=drive_service
                     )
-                    if success:
-                        logger.info(f"  [✔] Successfully saved questions to Google Doc!")
-                        existing_companies.add(company.lower())
+                    
+                    if doc_res and doc_res.get("url"):
+                        logger.info(f"  [✔] Successfully created Google Doc: {doc_res['name']}")
+                        logger.info(f"      Link: {doc_res['url']}")
+                        existing_docs[doc_res["name"].strip().lower()] = doc_res["id"]
                         total_scraped += 1
                     else:
-                        logger.warning(f"  [!] Failed to append questions to Google Doc for {company}.")
+                        logger.warning(f"  [!] Failed to create Google Doc for {doc_target_name}.")
                 else:
-                    logger.info(f"  [-] No custom questions found on form for {company}.")
+                    logger.info(f"  [-] No custom questions found on form for {doc_target_name}.")
                     total_failed += 1
 
             except Exception as e:
-                logger.error(f"  [✖] Error extracting questions for {company}: {e}")
+                logger.error(f"  [✖] Error extracting questions for {doc_target_name}: {e}")
                 total_failed += 1
             finally:
                 # Close any extra tabs opened for this job
@@ -492,7 +651,7 @@ async def run_scraper():
 
         await browser.close()
         logger.info("\n==========================================")
-        logger.info(f"Done! {total_scraped} companies saved to Google Doc, {total_failed} skipped/failed.")
+        logger.info(f"Done! {total_scraped} per-job Google Docs created, {total_failed} skipped/no questions.")
         logger.info("==========================================")
 
 def main():
