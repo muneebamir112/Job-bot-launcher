@@ -8,7 +8,6 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 
 SCOPES = [
-    "https://www.googleapis.com/auth/documents",
     "https://www.googleapis.com/auth/drive"
 ]
 

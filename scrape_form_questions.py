@@ -379,7 +379,7 @@ async def find_next_page_button(page):
         "a:has-text('Continue')"
     ]
     
-    forbidden_terms = ['submit', 'finish', 'complete', 'review and submit', 'back', 'previous', 'cancel', 'discard']
+    forbidden_terms = ['submit', 'finish', 'complete', 'review and submit', 'back', 'previous', 'cancel', 'discard', 'slide', 'carousel', 'prev']
 
     for frame in page.frames:
         for sel in next_selectors:
@@ -388,10 +388,16 @@ async def find_next_page_button(page):
                 for el in elements:
                     if await el.is_visible() and await el.is_enabled():
                         text = (await el.inner_text() or await el.get_attribute("value") or "").strip().lower()
-                        if any(term in text for term in forbidden_terms):
+                        aria_label = (await el.get_attribute("aria-label") or "").strip().lower()
+                        class_name = (await el.get_attribute("class") or "").strip().lower()
+
+                        if any(term in text or term in aria_label for term in forbidden_terms):
                             continue
-                        if 'next' in text or 'continue' in text or 'proceed' in text or 'next' in sel.lower():
-                            return {"element": el, "text": text or sel}
+                        if any(c in class_name for c in ['slick', 'swiper', 'carousel', 'slider', 'arrow']):
+                            continue
+
+                        if 'next' in text or 'continue' in text or 'proceed' in text or 'next' in aria_label or 'next' in sel.lower():
+                            return {"element": el, "text": text or aria_label or sel}
             except Exception:
                 continue
     return None
