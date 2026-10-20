@@ -1639,10 +1639,6 @@ class ScraperPanel(tk.Frame):
             btn_frame, text="Scrape All Jobs", width=20, command=self.start, style="Accent2.TButton",
         )
         self.start_btn.pack(side="left", padx=4)
-        self.scrape_questions_btn = ttk.Button(
-            btn_frame, text="Scrape Questions", width=16, command=self.start_questions_only, style="Secondary.TButton",
-        )
-        self.scrape_questions_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(
             btn_frame, text="Stop", width=8, command=self.stop, state="disabled", style="Secondary.TButton",
         )
@@ -1703,55 +1699,10 @@ class ScraperPanel(tk.Frame):
             return
         self._stop_requested = False
         self.start_btn.configure(state="disabled")
-        if hasattr(self, "scrape_questions_btn"):
-            self.scrape_questions_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.status_label.configure(text="Running...", fg=COLORS["running"])
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
-
-    def start_questions_only(self):
-        if self.is_running():
-            return
-        self._stop_requested = False
-        self.start_btn.configure(state="disabled")
-        self.scrape_questions_btn.configure(state="disabled")
-        self.stop_btn.configure(state="normal")
-        self.status_label.configure(text="Scraping Form Questions...", fg=COLORS["running"])
-        try:
-            self.notebook.select(3)
-        except Exception:
-            pass
-        self._thread = threading.Thread(target=self._run_questions_only, daemon=True)
-        self._thread.start()
-
-    def _run_questions_only(self):
-        run_start = datetime.now()
-        run_stamp = run_start.strftime('%Y-%m-%d_%H-%M-%S')
-        os.makedirs(LOGS_DIR, exist_ok=True)
-
-        self._log_fh = open(os.path.join(LOGS_DIR, f"scrape_all_{run_stamp}.log"), "a", encoding="utf-8")
-        platform_dir = os.path.join(LOGS_DIR, "Questions")
-        os.makedirs(platform_dir, exist_ok=True)
-        q_fh = open(os.path.join(platform_dir, f"scrape_questions_{run_stamp}.log"), "a", encoding="utf-8")
-        q_fh.write(stamp_log_line("=== Questions: starting ===\n"))
-        q_fh.flush()
-        self._platform_log_fhs["Questions"] = q_fh
-
-        self._log("\n=== Starting Question Scraper: Syncing Form Questions to Google Doc ===\n")
-        q_cwd = CURRENT_DIR
-        if getattr(sys, 'frozen', False):
-            q_cmd = [sys.executable, "scrape_form_questions"]
-        else:
-            q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
-
-        self._run_platform("Questions", q_cwd, q_cmd)
-
-        end_label = "stopped" if self._stop_requested else "finished"
-        elapsed = format_duration(datetime.now() - run_start)
-        self._log(f"\n=== Question Scraper: {end_label} (total time: {elapsed}) ===\n")
-        self._finish()
-        self._close_run_logs(end_label, elapsed)
 
     def stop(self):
         self._stop_requested = True
@@ -1960,8 +1911,6 @@ class ScraperPanel(tk.Frame):
         def _do():
             self.status_label.configure(text="Idle", fg=COLORS["idle"])
             self.start_btn.configure(state="normal")
-            if hasattr(self, "scrape_questions_btn"):
-                self.scrape_questions_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
         self.after(0, _do)
 
@@ -2986,9 +2935,6 @@ def main():
         scraper_panel.terminate_now()
         resume_panel.terminate_now()
         cover_letter_panel.terminate_now()
-        questions_panel.stop()
-        if questions_panel.process is not None:
-            questions_panel.process.terminate()
         apply_panel.stop()
         if apply_panel.process is not None:
             apply_panel.process.terminate()
