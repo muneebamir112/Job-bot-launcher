@@ -573,11 +573,19 @@ async def run_scraper():
 
     logger.info(f"Found {len(jobs_to_process)} total job links in the Google Sheet.")
     
+    keyword_filter = sys.argv[1].strip().lower() if len(sys.argv) > 1 and sys.argv[1].strip() else None
+    if keyword_filter:
+        logger.info(f"Filtering pending jobs for keyword: '{keyword_filter}'")
+
     # Filter out jobs that already have a dedicated Google Doc
     pending_jobs = []
     for comp, title, link, r_idx in jobs_to_process:
         target_name = f"{comp} - {title}".strip().lower()
         if target_name not in existing_docs:
+            if keyword_filter:
+                # Only process jobs whose title or company matches the keyword
+                if keyword_filter not in title.lower() and keyword_filter not in comp.lower():
+                    continue
             pending_jobs.append((comp, title, link, r_idx))
 
     logger.info(f"{len(pending_jobs)} job(s) pending question extraction.\n")

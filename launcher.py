@@ -126,6 +126,28 @@ def format_duration(td):
     return " ".join(parts)
 
 
+def kill_process_tree(proc):
+    """Forcefully kills a process and all of its spawned child processes
+    (e.g. Playwright / Patchright Chromium browser instances on Windows)."""
+    if proc is None:
+        return
+    try:
+        if sys.platform == "win32" and hasattr(proc, "pid") and proc.pid:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                creationflags=0x08000000
+            )
+        else:
+            proc.terminate()
+    except Exception:
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
 def configure_style(root):
     """One-time ttk theme setup so buttons/entries/scrollbars can be
     recolored (the default Windows ttk themes ignore most color options)."""
@@ -469,7 +491,7 @@ class BotPanel(tk.Frame):
         self._stop_requested = True
         if self.process is not None:
             self._append_log("\n--- Stopping... ---\n")
-            self.process.terminate()
+            kill_process_tree(self.process)
 
     def is_running(self):
         return self.process is not None
@@ -1702,17 +1724,14 @@ class ScraperPanel(tk.Frame):
         self.terminate_now()
 
     def terminate_now(self):
-        """Hard stop used when the app window is closing — kill whichever
+        """Hard stop used when the app window is closing or Stop is clicked — kill whichever
         platform subprocesses are currently running instead of waiting for
         them to finish."""
         self._stop_requested = True
         with self._procs_lock:
             procs = list(self._current_procs)
         for proc in procs:
-            try:
-                proc.terminate()
-            except Exception:
-                pass
+            kill_process_tree(proc)
 
     def edit_keywords(self):
         try:
@@ -1978,7 +1997,7 @@ class ScraperPanel(tk.Frame):
             stalled = False
             while True:
                 if self._stop_requested:
-                    proc.terminate()
+                    kill_process_tree(proc)
                     break
                 try:
                     line = line_queue.get(timeout=self.STALL_TIMEOUT_SECONDS)
@@ -1991,7 +2010,7 @@ class ScraperPanel(tk.Frame):
                     )
                     self._log_platform(label, msg)
                     _write_platform_log(msg)
-                    proc.terminate()
+                    kill_process_tree(proc)
                     break
                 if line is None:
                     break
@@ -1999,9 +2018,9 @@ class ScraperPanel(tk.Frame):
                 _write_platform_log(line)
 
             try:
-                code = proc.wait(timeout=15)
+                code = proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                kill_process_tree(proc)
                 code = proc.wait()
             if not stalled:
                 msg = f"\n--- {label} finished (exit code {code}) ---\n"
@@ -2087,9 +2106,9 @@ class ScraperPanel(tk.Frame):
                 self._log(f"  [Questions] Checking & syncing newly scraped jobs for '{title}' to Google Doc...\n")
                 q_cwd = CURRENT_DIR
                 if getattr(sys, 'frozen', False):
-                    q_cmd = [sys.executable, "scrape_form_questions"]
+                    q_cmd = [sys.executable, "scrape_form_questions", title]
                 else:
-                    q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
+                    q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py"), title]
                 self._run_platform("Questions", q_cwd, q_cmd)
 
         # Final pass for Question Scraper if enabled
