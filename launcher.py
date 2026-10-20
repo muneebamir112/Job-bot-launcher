@@ -98,7 +98,6 @@ COLORS = {
 }
 ACCENT_PALETTE = ["#4f8cff", "#c77dff", "#2dd4bf", "#f5a524", "#3ddc84"]
 
-
 def stamp_log_line(text):
     """Prefix a log line with its own [YYYY-MM-DD HH:MM:SS] timestamp, so
     every event in a run's log file shows exactly when it happened,
@@ -560,9 +559,10 @@ class ResumeBotPanel(BotPanel):
                 sheet = self._connect_sheet()
                 headers = sheet.row_values(1)
                 
-                # Check for jobs
-                jobs = self._fetch_jobs(sheet)
-                if not jobs:
+                # Fast check for jobs: check if row 2 has data without downloading the entire sheet
+                row2 = sheet.row_values(2)
+                has_job = bool(row2 and len(row2) >= 6 and (row2[1].strip() or row2[5].strip()))
+                if not has_job:
                     messagebox.showerror("Empty Sheet", "The Google Sheet is empty or contains no job links!\n\nPlease run the Scraper to add at least one job link before uploading profiles.")
                     return
             except Exception as e:
@@ -612,15 +612,17 @@ class ResumeBotPanel(BotPanel):
                     prof_cv_dir = os.path.join(CVS_DIR, prof_name)
                     os.makedirs(prof_cv_dir, exist_ok=True)
 
-                    # Create Google Drive folder for this profile automatically
-                    try:
-                        if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
-                            import google_drive_uploader
-                            drive_service = google_drive_uploader.get_drive_service()
-                            drive_folder_id = google_drive_uploader.get_or_create_profile_folder(drive_service, prof_name)
-                            self._append_log(f"\n[Drive] Created/verified Drive folder for '{prof_name}'!\n")
-                    except Exception as drive_err:
-                        self._append_log(f"\n[Drive Warning] Could not create Drive folder for '{prof_name}': {drive_err}\n")
+                    # Initialize Google Drive folder in a background thread so UI doesn't block
+                    def _init_drive_cv(p_name):
+                        try:
+                            if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                                import google_drive_uploader
+                                drive_service = google_drive_uploader.get_drive_service()
+                                google_drive_uploader.get_or_create_profile_folder(drive_service, p_name)
+                                self._append_log(f"\n[Drive] Created/verified Drive folder for '{p_name}'!\n")
+                        except Exception as drive_err:
+                            self._append_log(f"\n[Drive Warning] Could not create Drive folder for '{p_name}': {drive_err}\n")
+                    threading.Thread(target=_init_drive_cv, args=(prof_name,), daemon=True).start()
 
                     # Check sheet headers
                     headers_lower = [str(h).strip().lower() for h in headers]
@@ -1199,9 +1201,10 @@ class CoverLetterBotPanel(ResumeBotPanel):
                 sheet = self._connect_sheet()
                 headers = sheet.row_values(1)
                 
-                # Check for jobs
-                jobs = self._fetch_jobs(sheet)
-                if not jobs:
+                # Fast check for jobs: check if row 2 has data without downloading the entire sheet
+                row2 = sheet.row_values(2)
+                has_job = bool(row2 and len(row2) >= 6 and (row2[1].strip() or row2[5].strip()))
+                if not has_job:
                     messagebox.showerror("Empty Sheet", "The Google Sheet is empty or contains no job links!\n\nPlease run the Scraper to add at least one job link before uploading profiles.")
                     return
             except Exception as e:
@@ -1252,15 +1255,17 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     prof_cl_dir = os.path.join(cl_base_dir, prof_name)
                     os.makedirs(prof_cl_dir, exist_ok=True)
 
-                    # Create Google Drive folder for this profile under Cover Letters automatically
-                    try:
-                        if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
-                            import google_drive_uploader
-                            drive_service = google_drive_uploader.get_drive_service()
-                            drive_folder_id = google_drive_uploader.get_or_create_profile_folder(drive_service, prof_name, root_folder_name="Job Bot Cover Letters")
-                            self._append_log(f"\n[Drive] Created/verified Cover Letter Drive folder for '{prof_name}'!\n")
-                    except Exception as drive_err:
-                        self._append_log(f"\n[Drive Warning] Could not create Cover Letter Drive folder for '{prof_name}': {drive_err}\n")
+                    # Initialize Google Drive folder in a background thread so UI doesn't block
+                    def _init_drive_cl(p_name):
+                        try:
+                            if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                                import google_drive_uploader
+                                drive_service = google_drive_uploader.get_drive_service()
+                                google_drive_uploader.get_or_create_profile_folder(drive_service, p_name, root_folder_name="Job Bot Cover Letters")
+                                self._append_log(f"\n[Drive] Created/verified Cover Letter Drive folder for '{p_name}'!\n")
+                        except Exception as drive_err:
+                            self._append_log(f"\n[Drive Warning] Could not create Cover Letter Drive folder for '{p_name}': {drive_err}\n")
+                    threading.Thread(target=_init_drive_cl, args=(prof_name,), daemon=True).start()
 
                     # Check sheet headers
                     headers_lower = [str(h).strip().lower() for h in headers]
@@ -1540,7 +1545,12 @@ class ScraperPanel(tk.Frame):
 
     ACCENT = ACCENT_PALETTE[2]
     # Folder name (under LOGS_DIR) and log-filename slug per platform.
-    PLATFORM_SLUGS = {"Glassdoor": "glassdoor", "Hiring Cafe": "hiring_cafe", "Jobgether": "jobgether"}
+    PLATFORM_SLUGS = {
+        "Glassdoor": "glassdoor",
+        "Hiring Cafe": "hiring_cafe",
+        "Jobgether": "jobgether",
+        "Questions": "scrape_questions",
+    }
 
     def __init__(self, parent):
         super().__init__(
@@ -1572,6 +1582,10 @@ class ScraperPanel(tk.Frame):
             btn_frame, text="Scrape All Jobs", width=20, command=self.start, style="Accent2.TButton",
         )
         self.start_btn.pack(side="left", padx=4)
+        self.scrape_questions_btn = ttk.Button(
+            btn_frame, text="Scrape Questions", width=16, command=self.start_questions_only, style="Secondary.TButton",
+        )
+        self.scrape_questions_btn.pack(side="left", padx=4)
         self.stop_btn = ttk.Button(
             btn_frame, text="Stop", width=8, command=self.stop, state="disabled", style="Secondary.TButton",
         )
@@ -1591,24 +1605,32 @@ class ScraperPanel(tk.Frame):
         )
         self.open_profile_btn.pack(side="left", padx=4)
 
+        opt_frame = tk.Frame(self, bg=COLORS["panel_bg"])
+        opt_frame.pack(pady=(2, 6))
+        self.scrape_questions_var = tk.BooleanVar(value=True)
+        tk.Checkbutton(
+            opt_frame, text="Also scrape application form questions to Google Doc",
+            variable=self.scrape_questions_var, fg=COLORS["text"], bg=COLORS["panel_bg"],
+            selectcolor=COLORS["input_bg"], activebackground=COLORS["panel_bg"],
+            activeforeground=COLORS["text"], font=("Segoe UI", 9)
+        ).pack()
+
         self.status_label = tk.Label(self, text="Idle", fg=COLORS["idle"], bg=COLORS["panel_bg"], font=("Segoe UI", 9))
         self.status_label.pack(pady=(0, 6))
 
-        # A separate log tab per platform instead of one shared box, so
-        # concurrent Glassdoor/Hiring Cafe/Jobgether output doesn't interleave
-        # into a single hard-to-read stream.
-        notebook = ttk.Notebook(self)
-        notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
+        # A separate log tab per platform, plus a dedicated tab for Question Scraper
+        self.notebook = ttk.Notebook(self)
+        self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.log_boxes = {}
-        for label in ("Glassdoor", "Hiring Cafe", "Jobgether"):
-            tab = tk.Frame(notebook, bg=COLORS["input_bg"])
+        for label in ("Glassdoor", "Hiring Cafe", "Jobgether", "Questions"):
+            tab = tk.Frame(self.notebook, bg=COLORS["input_bg"])
             box = scrolledtext.ScrolledText(
                 tab, width=58, height=28, state="disabled", bg=COLORS["input_bg"], fg=COLORS["text"],
                 insertbackground=COLORS["text"], font=("Consolas", 9), bd=0,
                 highlightthickness=1, highlightbackground=COLORS["border"], highlightcolor=self.ACCENT,
             )
             box.pack(fill="both", expand=True)
-            notebook.add(tab, text=label)
+            self.notebook.add(tab, text=label)
             self.log_boxes[label] = box
 
         # Opened fresh per run in _run() - a new timestamped file per click of
@@ -1624,10 +1646,55 @@ class ScraperPanel(tk.Frame):
             return
         self._stop_requested = False
         self.start_btn.configure(state="disabled")
+        if hasattr(self, "scrape_questions_btn"):
+            self.scrape_questions_btn.configure(state="disabled")
         self.stop_btn.configure(state="normal")
         self.status_label.configure(text="Running...", fg=COLORS["running"])
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
+
+    def start_questions_only(self):
+        if self.is_running():
+            return
+        self._stop_requested = False
+        self.start_btn.configure(state="disabled")
+        self.scrape_questions_btn.configure(state="disabled")
+        self.stop_btn.configure(state="normal")
+        self.status_label.configure(text="Scraping Form Questions...", fg=COLORS["running"])
+        try:
+            self.notebook.select(3)
+        except Exception:
+            pass
+        self._thread = threading.Thread(target=self._run_questions_only, daemon=True)
+        self._thread.start()
+
+    def _run_questions_only(self):
+        run_start = datetime.now()
+        run_stamp = run_start.strftime('%Y-%m-%d_%H-%M-%S')
+        os.makedirs(LOGS_DIR, exist_ok=True)
+
+        self._log_fh = open(os.path.join(LOGS_DIR, f"scrape_all_{run_stamp}.log"), "a", encoding="utf-8")
+        platform_dir = os.path.join(LOGS_DIR, "Questions")
+        os.makedirs(platform_dir, exist_ok=True)
+        q_fh = open(os.path.join(platform_dir, f"scrape_questions_{run_stamp}.log"), "a", encoding="utf-8")
+        q_fh.write(stamp_log_line("=== Questions: starting ===\n"))
+        q_fh.flush()
+        self._platform_log_fhs["Questions"] = q_fh
+
+        self._log("\n=== Starting Question Scraper: Syncing Form Questions to Google Doc ===\n")
+        q_cwd = CURRENT_DIR
+        if getattr(sys, 'frozen', False):
+            q_cmd = [sys.executable, "scrape_form_questions"]
+        else:
+            q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
+
+        self._run_platform("Questions", q_cwd, q_cmd)
+
+        end_label = "stopped" if self._stop_requested else "finished"
+        elapsed = format_duration(datetime.now() - run_start)
+        self._log(f"\n=== Question Scraper: {end_label} (total time: {elapsed}) ===\n")
+        self._finish()
+        self._close_run_logs(end_label, elapsed)
 
     def stop(self):
         self._stop_requested = True
@@ -1834,31 +1901,13 @@ class ScraperPanel(tk.Frame):
         self.after(0, lambda: self.status_label.configure(text=text, fg=color))
 
 
-    def _check_button_state(self):
-        try:
-            val_str = str(self.num_profiles_var.get())
-            num = int(val_str)
-            
-            # Disable if uploaded profiles don't match the required count
-            if len(self.active_profiles) != num:
-                valid = False
-            else:
-                valid = True
-        except Exception:
-            valid = False
-            
-        if valid and not self.is_running():
-            self.start_btn.configure(state="normal")
-        else:
-            self.start_btn.configure(state="disabled")
-            
-        self.after(200, self._check_button_state)
-
     def _finish(self):
 
         def _do():
             self.status_label.configure(text="Idle", fg=COLORS["idle"])
             self.start_btn.configure(state="normal")
+            if hasattr(self, "scrape_questions_btn"):
+                self.scrape_questions_btn.configure(state="normal")
             self.stop_btn.configure(state="disabled")
         self.after(0, _do)
 
@@ -2033,6 +2082,28 @@ class ScraperPanel(tk.Frame):
             if not self._stop_requested and failed:
                 self._log(f"  {title} | {location}: {', '.join(failed)} did not finish cleanly\n")
 
+            # Incrementally sync questions to Google Doc for any newly discovered jobs from this keyword
+            if not self._stop_requested and getattr(self, "scrape_questions_var", None) and self.scrape_questions_var.get():
+                self._log(f"  [Questions] Checking & syncing newly scraped jobs for '{title}' to Google Doc...\n")
+                q_cwd = CURRENT_DIR
+                if getattr(sys, 'frozen', False):
+                    q_cmd = [sys.executable, "scrape_form_questions"]
+                else:
+                    q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
+                self._run_platform("Questions", q_cwd, q_cmd)
+
+        # Final pass for Question Scraper if enabled
+        if not self._stop_requested and getattr(self, "scrape_questions_var", None) and self.scrape_questions_var.get():
+            self._log("\n=== Final Question Scraper Pass: Ensuring all sheet jobs are synced ===\n")
+            self._set_status("Scraping Form Questions...", COLORS["running"])
+            q_cwd = CURRENT_DIR
+            if getattr(sys, 'frozen', False):
+                q_cmd = [sys.executable, "scrape_form_questions"]
+            else:
+                q_cmd = [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
+
+            self._run_platform("Questions", q_cwd, q_cmd)
+
         end_label = "stopped" if self._stop_requested else "finished"
         elapsed = format_duration(datetime.now() - run_start)
         self._log(f"\n=== Scrape All: {end_label} (total time: {elapsed}) ===\n")
@@ -2147,7 +2218,7 @@ def check_prerequisites(root):
     f1.columnconfigure(1, weight=0)
     f1.columnconfigure(2, weight=0)
     
-    tk.Label(f1, text="1. Google Cloud Service Account", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=3, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f1, text="1. Google Cloud Service Account (Required *)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=3, sticky="w", padx=20, pady=(20, 5))
     tk.Label(f1, text="This is the .json key file that grants the bot access to your Google Sheet.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=3, sticky="w", padx=20, pady=(0, 15))
     
     sa_var = tk.StringVar(value="Status: Found ?" if sa_found else "Status: Missing ?")
@@ -2186,7 +2257,7 @@ def check_prerequisites(root):
     f2 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
     f2.pack(fill="x", pady=10, padx=5)
     
-    tk.Label(f2, text="2. Google Sheet ID", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f2, text="2. Google Sheet ID (Required *)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
     tk.Label(f2, text="The unique ID of the Google Sheet where jobs are stored.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
     
     sheet_entry = tk.Entry(f2, width=65, bg="#121212", fg=fg_color, insertbackground=fg_color, font=("Consolas", 11), relief="flat")
@@ -2198,7 +2269,7 @@ def check_prerequisites(root):
     f3 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
     f3.pack(fill="x", pady=10, padx=5)
     
-    tk.Label(f3, text="3. Output Folder for Resumes", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f3, text="3. Output Folder for Resumes (Required *)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
     tk.Label(f3, text="Where should your customized PDF resumes be saved?", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
     
     resume_path_var = tk.StringVar(value=os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs")))
@@ -2215,7 +2286,7 @@ def check_prerequisites(root):
     tk.Button(f3, text="Browse...", command=browse_path, font=("Segoe UI", 10, "bold"), bg="#555", fg="white", relief="flat", cursor="hand2").grid(row=2, column=1, padx=(0, 20), pady=5, sticky="ew")
     
     # 3b. Cover Letter Save Folder
-    tk.Label(f3, text="Output Folder for Cover Letters", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f3, text="Output Folder for Cover Letters (Required *)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=3, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
     tk.Label(f3, text="Where should your customized PDF cover letters be saved?", bg=panel_bg, fg="#AAAAAA", font=("Segoe UI", 10)).grid(row=4, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
     
     cl_path_var = tk.StringVar(value=os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "CVs")))
@@ -2247,7 +2318,7 @@ def check_prerequisites(root):
     f3 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
     f3.pack(fill="x", pady=10, padx=5)
     
-    tk.Label(f3, text="3. Ollama AI Engine", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
+    tk.Label(f3, text="4. Ollama AI Engine (Required *)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
     tk.Label(f3, text="Ollama powers the dynamic resume generation and cover letter writing.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
     
     status_frame = tk.Frame(f3, bg=panel_bg)
@@ -2299,39 +2370,6 @@ def check_prerequisites(root):
     err_ollama_lbl = tk.Label(input_frame, text="", fg=error_color, bg=panel_bg, font=("Segoe UI", 10, "bold"))
     err_ollama_lbl.grid(row=3, column=0, columnspan=2, sticky="w", pady=(5, 0))
     err_ollama_lbl.grid_remove()
-    
-    # Section 4 - Browser Automation
-    f4 = tk.Frame(frame, bg=panel_bg, highlightbackground="#333333", highlightthickness=1)
-    f4.pack(fill="x", pady=10, padx=5)
-    
-    tk.Label(f4, text="4. Browser Engine (Chromium)", font=("Segoe UI", 13, "bold"), bg=panel_bg, fg="#FFFFFF").grid(row=0, column=0, columnspan=2, sticky="w", padx=20, pady=(20, 5))
-    tk.Label(f4, text="The bot needs Chromium to browse job sites. If not installed, click below to download it.", bg=panel_bg, fg=help_color, font=("Segoe UI", 10)).grid(row=1, column=0, columnspan=2, sticky="w", padx=20, pady=(0, 15))
-    
-    browser_status_var = tk.StringVar(value="Status: Ready to install/verify")
-    browser_status_lbl = tk.Label(f4, textvariable=browser_status_var, bg=panel_bg, fg="#FFB900", font=("Segoe UI", 10, "bold"))
-    browser_status_lbl.grid(row=2, column=0, sticky="w", padx=20, pady=(0, 15))
-    
-    def install_browser():
-        install_browser_btn.configure(state="disabled", text="Installing... (May take a few minutes)")
-        setup_win.update()
-        try:
-            if getattr(sys, 'frozen', False):
-                cmd = [sys.executable, "install_browser"]
-            else:
-                cmd = [sys.executable, "-m", "patchright", "install", "chromium"]
-            
-            subprocess.run(cmd, check=True, creationflags=(0x08000000 if sys.platform == "win32" else 0))
-            
-            browser_status_var.set("Status: Installed ✔")
-            browser_status_lbl.configure(fg=success_color)
-            install_browser_btn.configure(text="Installed")
-        except Exception as e:
-            browser_status_var.set(f"Status: Failed ✖ ({e})")
-            browser_status_lbl.configure(fg=error_color)
-            install_browser_btn.configure(state="normal", text="Retry Install")
-            
-    install_browser_btn = tk.Button(f4, text="Install / Verify Chromium", command=install_browser, bg="#333333", fg=fg_color, relief="flat", cursor="hand2", padx=10)
-    install_browser_btn.grid(row=3, column=0, sticky="w", padx=20, pady=(0, 15))
 
     # Section 5 - Verification
     f5 = tk.Frame(frame, bg=bg_color)
@@ -2872,30 +2910,6 @@ def main():
         log_file=os.path.join(LOGS_DIR, "cover_letter_bot.log"),
     )
     cover_letter_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
-
-    class QuestionScraperPanel(BotPanel):
-        def __init__(self, parent):
-            super().__init__(
-                parent, "Question Scraper", "Scrape Form Questions",
-                "scrape_form_questions.py", CURRENT_DIR,
-                log_file=os.path.join(LOGS_DIR, "scrape_questions.log"),
-            )
-            self.edit_kw_btn.pack_forget()
-
-        def build_inputs(self, parent):
-            tk.Label(
-                parent,
-                text="Scrapes questions from all job forms in the sheet\nregardless of resume status and saves to Google Doc.",
-                fg=COLORS["muted"], bg=COLORS["panel_bg"], font=("Segoe UI", 8), justify="center",
-            ).pack(anchor="w", pady=(0, 6))
-
-        def build_command(self):
-            if getattr(sys, 'frozen', False):
-                return [sys.executable, "scrape_form_questions"]
-            return [sys.executable, "-u", os.path.join(CURRENT_DIR, "scrape_form_questions.py")]
-
-    questions_panel = QuestionScraperPanel(container)
-    questions_panel.pack(side="left", fill="both", expand=True, padx=6, pady=6)
 
     class JobBotPanel(BotPanel):
         def build_inputs(self, parent):

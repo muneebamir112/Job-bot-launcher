@@ -7,6 +7,10 @@ from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
 
+for _s in (sys.stdout, sys.stderr):
+    if hasattr(_s, "reconfigure"):
+        _s.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
+
 try:
     from patchright.async_api import async_playwright, TimeoutError as PlaywrightTimeoutError
 except ImportError:
