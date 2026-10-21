@@ -75,7 +75,7 @@ load_dotenv(os.path.join(CURRENT_DIR, ".env"))
 
 # Same spreadsheet the scrapers already sync job links into (Sheet1). Sheet2
 # holds the job-title/location queue that "Scrape All Platforms" reads from.
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1Kva2y5-54LXBWMTzNk_xp524ZE7N-CWiqL3VGATUZVM")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
 SHEET2_NAME = "Sheet2"
 SERVICE_ACCOUNT_CANDIDATES = [
     os.path.join(CURRENT_DIR, "service_account.json"),
@@ -649,11 +649,18 @@ class ResumeBotPanel(BotPanel):
                     # Check sheet headers
                     headers_lower = [str(h).strip().lower() for h in headers]
                     if prof_name.lower() not in headers_lower:
-                        # Append to sheet
-                        new_col_idx = len(headers) + 1
+                        # Append to sheet dynamically at the first free column after existing non-empty headers
+                        last_non_empty_idx = 0
+                        for idx, h in enumerate(headers):
+                            if str(h).strip():
+                                last_non_empty_idx = idx + 1
+                        new_col_idx = max(last_non_empty_idx + 1, len(headers) + 1)
+
                         sheet.update_cell(1, new_col_idx, prof_name)
-                        headers.append(prof_name)  # update local cache for next iteration
-                        self._append_log(f"\n[+] Added new profile column '{prof_name}' to Google Sheet!\n")
+                        while len(headers) < new_col_idx:
+                            headers.append("")
+                        headers[new_col_idx - 1] = prof_name  # update local cache for next iteration
+                        self._append_log(f"\n[+] Added new profile column '{prof_name}' to Google Sheet (Col {new_col_idx})!\n")
                         added_count += 1
                         
                 except Exception as e:
@@ -815,6 +822,11 @@ class ResumeBotPanel(BotPanel):
 
     DESCRIPTION_HEADER = "Job Description"
 
+    BASE_COLUMNS = {
+        "no.", "company name", "job title", "location", "job age",
+        "job link", "date posted", "date added", "platform", "job description", "status"
+    }
+
     @staticmethod
     def _col_letter(n):
         """1-based column number -> letters (1 -> A, 27 -> AA)."""
@@ -824,14 +836,26 @@ class ResumeBotPanel(BotPanel):
             letters = chr(65 + rem) + letters
         return letters
 
+    def _col_mapping(self, headers):
+        """Returns a dict mapping lowercase stripped header -> 0-based index."""
+        return {str(h).strip().lower(): idx for idx, h in enumerate(headers) if str(h).strip()}
+
     def _description_col(self, headers):
         """0-based index of the Job Description column, or None on a sheet that doesn't have it yet."""
-        return headers.index(self.DESCRIPTION_HEADER) if self.DESCRIPTION_HEADER in headers else None
+        col_map = self._col_mapping(headers)
+        return col_map.get(self.DESCRIPTION_HEADER.lower(), None)
 
     def _first_profile_col(self, headers):
-        """0-based column where candidate names start: right after Job Description (old sheets: column I)."""
+        """0-based column where candidate profile names start.
+        Candidate profiles are placed after the Job Description / base job fields.
+        Finds the first non-empty header after Job Description that is not a base column."""
         d = self._description_col(headers)
-        return d + 1 if d is not None else 8
+        search_start = (d + 1) if d is not None else 8
+        for idx in range(search_start, len(headers)):
+            clean = str(headers[idx]).strip().lower()
+            if clean and clean not in self.BASE_COLUMNS:
+                return idx
+        return search_start
 
     def _read_rows(self, ws):
         """Data rows (from row 2) at full header width, without downloading the long Job Description column."""
@@ -887,12 +911,16 @@ class ResumeBotPanel(BotPanel):
             return ""
 
     def _fetch_jobs(self, ws):
+        headers = ws.row_values(1)
+        col_map = self._col_mapping(headers)
+        company_idx = col_map.get("company name", 1)
+        link_idx = col_map.get("job link", 5)
+
         rows = self._read_rows(ws)
         jobs = []
         for i, r in enumerate(rows, start=2):  # row 2 is the first data row
-            if len(r) < 6:
-                continue
-            company, link = r[1].strip(), r[5].strip()
+            company = r[company_idx].strip() if len(r) > company_idx else ""
+            link = r[link_idx].strip() if len(r) > link_idx else ""
             
             if not company and link:
                 try:
@@ -1292,11 +1320,18 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     # Check sheet headers
                     headers_lower = [str(h).strip().lower() for h in headers]
                     if prof_name.lower() not in headers_lower:
-                        # Append to sheet
-                        new_col_idx = len(headers) + 1
+                        # Append to sheet dynamically at the first free column after existing non-empty headers
+                        last_non_empty_idx = 0
+                        for idx, h in enumerate(headers):
+                            if str(h).strip():
+                                last_non_empty_idx = idx + 1
+                        new_col_idx = max(last_non_empty_idx + 1, len(headers) + 1)
+
                         sheet.update_cell(1, new_col_idx, prof_name)
-                        headers.append(prof_name)  # update local cache for next iteration
-                        self._append_log(f"\n[+] Added new profile column '{prof_name}' to Google Sheet!\n")
+                        while len(headers) < new_col_idx:
+                            headers.append("")
+                        headers[new_col_idx - 1] = prof_name  # update local cache for next iteration
+                        self._append_log(f"\n[+] Added new profile column '{prof_name}' to Google Sheet (Col {new_col_idx})!\n")
                         added_count += 1
                         
                 except Exception as e:

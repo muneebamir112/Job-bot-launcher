@@ -32,7 +32,8 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive"
 ]
 
-GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "1FsPR9t-BB1GZ6kWfANnrDfq4p9XobDuA1tVB4D2sJDg")
+GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID", "").strip()
 SERVICE_ACCOUNT_FILE = os.path.join(CURRENT_DIR, "service_account.json")
 if not os.path.exists(SERVICE_ACCOUNT_FILE):
     alt_sa = os.path.join(BASE_DIR, "service_account.json")
