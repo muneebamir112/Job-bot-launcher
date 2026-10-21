@@ -2,7 +2,9 @@ import asyncio
 import os
 import sys
 import re
+import time
 import logging
+import threading
 from dotenv import load_dotenv
 import gspread
 from google.oauth2.service_account import Credentials
@@ -67,10 +69,36 @@ EXCLUDED_BASIC_KEYWORDS = [
 ]
 
 async def dismiss_popups(page):
+    dismiss_js = """() => {
+        const selectors = [
+            '#onetrust-accept-btn-handler', 'button#onetrust-accept-btn-handler',
+            '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+            '#CybotCookiebotDialogBodyButtonAccept', '#didomi-notice-agree-button',
+            '.osano-cm-accept-all', '#truste-consent-button', '[data-testid="uc-accept-all-button"]',
+            'button[id*="cookie-accept" i]', 'button[class*="cookie-accept" i]'
+        ];
+        for (const s of selectors) {
+            try {
+                const el = document.querySelector(s);
+                if (el && (el.offsetParent !== null || el.getBoundingClientRect().height > 0)) {
+                    el.click();
+                    return true;
+                }
+            } catch (e) {}
+        }
+        return false;
+    }"""
+    try:
+        await page.evaluate(dismiss_js)
+    except Exception:
+        pass
+
     selectors = [
-        "button:has-text('Accept All')", "button:has-text('Accept Cookies')",
-        "button:has-text('I agree')", "button:has-text('Got it')",
-        "button:has-text('Dismiss')", "button[aria-label='Close']",
+        "button:has-text('Accept all cookies')", "button:has-text('Accept All Cookies')",
+        "button:has-text('Accept All')", "button:has-text('Accept all')",
+        "button:has-text('Accept Cookies')", "button:has-text('Allow all cookies')",
+        "button:has-text('Allow All')", "button:has-text('I agree')", "button:has-text('I Agree')",
+        "button:has-text('Got it')", "button:has-text('Dismiss')", "button[aria-label='Close']",
         "button.close", ".close-modal"
     ]
     for s in selectors:
@@ -79,6 +107,7 @@ async def dismiss_popups(page):
                 if await el.is_visible():
                     await el.click(timeout=1000)
                     await asyncio.sleep(0.3)
+                    break
         except Exception:
             pass
 
@@ -87,18 +116,31 @@ async def click_apply_button_if_present(page, context):
     If on a job landing / JD page, clicks 'Apply' or 'Apply Now' to reveal the application form.
     Handles multi-tab navigation if a new tab is opened.
     """
+    # 1. If the current page already contains an active application form, do not click away!
+    try:
+        active_form_count = await page.locator(
+            "form input[type='file'], input[name*='resume' i], input[id*='resume' i], #resumator-form, .application-form, form[action*='apply']"
+        ).count()
+        if active_form_count > 0:
+            logger.info("  -> Application form already active on page. No need to click apply trigger.")
+            return page
+    except Exception:
+        pass
+
     apply_selectors = [
-        "a[href*='apply']:not([href*='linkedin']):not([href*='indeed'])",
-        "button:has-text('Apply Now')", "a:has-text('Apply Now')",
         "button:has-text('Apply for this job')", "a:has-text('Apply for this job')",
+        "button:has-text('Apply for this Job')", "a:has-text('Apply for this Job')",
+        "button:has-text('Apply Now')", "a:has-text('Apply Now')",
         "button:has-text('Apply Online')", "a:has-text('Apply Online')",
         "button:has-text('Start Application')", "a:has-text('Start Application')",
         "[data-automation-id='applyButton']", "[data-automation-id='jobFoundationalApplyButton']",
+        "a[href*='apply']:not([href*='linkedin']):not([href*='indeed'])",
         "button:has-text('Apply')", "a:has-text('Apply')"
     ]
     
     target_page = page
     initial_pages = len(context.pages)
+    forbidden_terms = ['all jobs', 'other jobs', 'view all', 'search', 'browse', 'share', 'back', 'career', 'return', 'login', 'sign in']
     
     for sel in apply_selectors:
         try:
@@ -106,6 +148,9 @@ async def click_apply_button_if_present(page, context):
             for btn in btns[:2]:
                 if await btn.is_visible() and await btn.is_enabled():
                     btn_text = (await btn.inner_text()).strip()
+                    btn_lower = btn_text.lower()
+                    if any(term in btn_lower for term in forbidden_terms):
+                        continue
                     logger.info(f"  -> Found apply trigger '{btn_text}', clicking...")
                     await btn.click(timeout=3000)
                     await asyncio.sleep(3)
@@ -122,9 +167,9 @@ async def click_apply_button_if_present(page, context):
 
 async def extract_form_questions(page) -> list:
     """
-    Scans the page and all embedded frames (ATS iframes like Greenhouse, Lever, Workday)
+    Scans the page and all embedded frames (ATS iframes like Ashby, Greenhouse, Lever, Workday)
     for custom application questions, extracting both the question prompt and its available
-    options (dropdown options, radio choices, checkbox options).
+    options (dropdown options, radio choices, checkbox options, Yes/No pills).
     """
     raw_items = []
     seen_prompts = set()
@@ -134,36 +179,40 @@ async def extract_form_questions(page) -> list:
             frame_results = await frame.evaluate('''() => {
                 const results = [];
                 const localSeen = new Set();
-
-                // Helper: clean text
                 const clean = (t) => (t || '').trim().replace(/\\s+/g, ' ');
 
-                // 1. Group containers: Fieldsets, [role="radiogroup"], [role="group"], custom questions
+                // 1. Group containers: Fieldsets, [role="radiogroup"], [role="group"], custom questions, Ashby field entries
                 const groupContainers = document.querySelectorAll(
-                    'fieldset, [role="radiogroup"], [role="group"], .application-question, [class*="question"], [class*="form-group"]'
+                    'fieldset, [role="radiogroup"], [role="group"], .application-question, [class*="question"], [class*="form-group"], [class*="field-entry"], [class*="fieldEntry"]'
                 );
                 for (const container of groupContainers) {
                     const headingEl = container.querySelector(
-                        'legend, [role="heading"], [class*="legend"], [class*="label"], [class*="title"], [class*="prompt"], h3, h4, h5, p'
+                        'legend, [role="heading"], [class*="legend"], [class*="label"], [class*="title"], [class*="prompt"], [class*="question-title"], h3, h4, h5, p, label'
                     );
                     if (!headingEl) continue;
                     const qText = clean(headingEl.innerText || headingEl.textContent);
                     if (!qText || qText.length < 5 || qText.length > 350) continue;
                     if (localSeen.has(qText.toLowerCase())) continue;
 
-                    // Check for radio or checkbox options inside this container
+                    // Check for radio, checkbox, or pill/button options inside this container
                     const optionEls = container.querySelectorAll(
-                        'input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"]'
+                        'input[type="radio"], input[type="checkbox"], [role="radio"], [role="checkbox"], button[data-option], [class*="yesno-option"], [class*="pill-option"], [class*="option-button"]'
                     );
                     const options = [];
                     for (const optEl of optionEls) {
                         let optText = '';
-                        if (optEl.id) {
+                        if (optEl.getAttribute && optEl.getAttribute('data-option')) {
+                            optText = optEl.getAttribute('data-option');
+                        }
+                        if (!optText && optEl.id) {
                             const l = container.querySelector(`label[for="${optEl.id}"]`);
                             if (l) optText = l.innerText;
                         }
-                        if (!optText && optEl.closest('label')) {
+                        if (!optText && optEl.closest && optEl.closest('label')) {
                             optText = optEl.closest('label').innerText;
+                        }
+                        if (!optText) {
+                            optText = optEl.innerText || optEl.textContent;
                         }
                         if (!optText && optEl.value && optEl.value !== 'on') {
                             optText = optEl.value;
@@ -174,7 +223,9 @@ async def extract_form_questions(page) -> list:
                         }
                     }
 
-                    if (options.length > 0) {
+                    // Check if container has input/textarea/select controls
+                    const hasControls = container.querySelector('input, textarea, select, [contenteditable="true"]');
+                    if (options.length > 0 || hasControls) {
                         localSeen.add(qText.toLowerCase());
                         results.push({question: qText, options: options});
                     }
@@ -221,7 +272,6 @@ async def extract_form_questions(page) -> list:
                         }
                     }
 
-                    // If this dropdown is purely phone country codes, skip it
                     if (isCountryCodeList(opts)) {
                         continue;
                     }
@@ -351,7 +401,6 @@ async def extract_form_questions(page) -> list:
 
     return cleaned
 
-
 async def find_next_page_button(page):
     """
     Scans the page and all frames for a 'Next', 'Continue', or 'Proceed' button
@@ -402,7 +451,6 @@ async def find_next_page_button(page):
                 continue
     return None
 
-
 async def fill_required_fields_if_needed(page):
     """
     If a multi-step form has required basic fields on early pages that prevent advancing,
@@ -442,7 +490,6 @@ async def fill_required_fields_if_needed(page):
                     continue
         except Exception:
             pass
-
 
 async def scrape_all_pages_questions(active_page, context, max_pages=7) -> list:
     """
@@ -508,13 +555,110 @@ async def scrape_all_pages_questions(active_page, context, max_pages=7) -> list:
     return all_questions
 
 
+def get_column_indices(ws):
+    """
+    Dynamically maps header columns from the Google Sheet and guarantees
+    the presence of 'Questions Doc Link' and 'Questions Count'.
+    """
+    rows = ws.get_all_values()
+    headers = [str(h).strip() for h in (rows[0] if rows else [])]
+    h_lowers = [h.lower() for h in headers]
+
+    company_col_idx = 1
+    title_col_idx = 2
+    job_link_col_idx = 5
+    doc_link_col_idx = None
+    count_col_idx = None
+
+    for i, h in enumerate(h_lowers):
+        if "company" in h:
+            company_col_idx = i
+        elif "job title" in h or ("title" in h and "question" not in h):
+            title_col_idx = i
+        elif "questions doc" in h or "doc link" in h or ("question" in h and "link" in h):
+            doc_link_col_idx = i
+        elif "questions count" in h or "question count" in h or ("question" in h and "count" in h):
+            count_col_idx = i
+        elif ("job link" in h or "link" in h or "url" in h) and "doc" not in h and "question" not in h:
+            job_link_col_idx = i
+
+    # If question columns are missing from the sheet, add them
+    updated_headers = False
+    if doc_link_col_idx is None:
+        headers.append("Questions Doc Link")
+        doc_link_col_idx = len(headers) - 1
+        updated_headers = True
+    if count_col_idx is None:
+        headers.append("Questions Count")
+        count_col_idx = len(headers) - 1
+        updated_headers = True
+
+    if updated_headers:
+        try:
+            ws.update(range_name=f"A1:{gspread.utils.rowcol_to_a1(1, len(headers))}", values=[headers], value_input_option="USER_ENTERED")
+            logger.info(f"[Sheet] Added Question columns: Doc Link (Col {doc_link_col_idx + 1}), Count (Col {count_col_idx + 1})")
+        except Exception as e:
+            logger.warning(f"[Sheet] Warning appending question headers: {e}")
+
+    return company_col_idx, title_col_idx, job_link_col_idx, doc_link_col_idx, count_col_idx
+
+
+def update_sheet_row(ws, row_num: int, doc_link_col_idx: int, count_col_idx: int, doc_url: str, count_str: str):
+    """
+    Updates the Google Sheet for a given job row with its Google Doc Link and Question Count.
+    Uses batch update to make a single atomic API call per job.
+    """
+    try:
+        if doc_url and doc_url.startswith("http"):
+            doc_cell = f'=HYPERLINK("{doc_url}", "{doc_url}")'
+        else:
+            doc_cell = doc_url or "-"
+
+        # If columns are adjacent (e.g., Col 10 and Col 11)
+        if count_col_idx == doc_link_col_idx + 1:
+            start_a1 = gspread.utils.rowcol_to_a1(row_num, doc_link_col_idx + 1)
+            end_a1 = gspread.utils.rowcol_to_a1(row_num, count_col_idx + 1)
+            ws.update(range_name=f"{start_a1}:{end_a1}", values=[[doc_cell, count_str]], value_input_option="USER_ENTERED")
+        else:
+            ws.update_cell(row_num, doc_link_col_idx + 1, doc_cell)
+            ws.update_cell(row_num, count_col_idx + 1, count_str)
+        return True
+    except Exception as e:
+        logger.error(f"[Sheet] Error updating Row {row_num} in Google Sheet: {e}")
+        return False
+
+
 async def run_scraper():
     logger.info("==========================================")
     logger.info("  Form Questions Scraper (Per-Job Docs)   ")
     logger.info("==========================================")
     logger.info(f"Source Google Sheet ID: {GOOGLE_SHEET_ID}")
-    
-    # 1. Initialize Google Drive & fetch existing question docs to prevent duplicates
+
+    continuous_mode = ("--continuous" in sys.argv)
+    drain_mode = not continuous_mode  # in single-shot mode, drain immediately
+
+    # Background stdin listener for DRAIN command from launcher
+    def _stdin_listener():
+        nonlocal drain_mode
+        try:
+            for line in sys.stdin:
+                line_str = line.strip().upper()
+                if "DRAIN" in line_str:
+                    logger.info("[Control] Received DRAIN signal. Finishing remaining jobs before exiting.")
+                    drain_mode = True
+                    break
+        except Exception:
+            pass
+        drain_mode = True
+
+    if continuous_mode:
+        t = threading.Thread(target=_stdin_listener, daemon=True)
+        t.start()
+        logger.info("[Mode] Running in CONTINUOUS mode alongside active job scrapers.")
+    else:
+        logger.info("[Mode] Running in SINGLE-PASS mode.")
+
+    # 1. Initialize Google Drive & fetch existing question docs to prevent duplicate creations
     drive_service = None
     existing_docs = {}
     try:
@@ -534,139 +678,175 @@ async def run_scraper():
             ws = spreadsheet.worksheet("Jobs")
         except Exception:
             ws = spreadsheet.sheet1
-        rows = ws.get_all_values()
     except Exception as e:
         logger.error(f"Failed to connect to Google Sheet: {e}")
         return
 
-    if len(rows) < 2:
-        logger.warning("No jobs found in the 'Jobs' worksheet.")
-        return
+    company_col_idx, title_col_idx, job_link_col_idx, doc_link_col_idx, count_col_idx = get_column_indices(ws)
 
-    headers = rows[0]
-    data_rows = rows[1:]
-
-    # Locate Company, Title, and Link columns
-    company_col_idx = 1 # Column B (default)
-    title_col_idx = 2   # Column C (default)
-    link_col_idx = 5    # Column F (default)
-
-    for i, h in enumerate(headers):
-        h_lower = str(h).strip().lower()
-        if "company" in h_lower:
-            company_col_idx = i
-        elif "title" in h_lower:
-            title_col_idx = i
-        elif "link" in h_lower or "url" in h_lower:
-            link_col_idx = i
-
-    jobs_to_process = []
-    for r_idx, r in enumerate(data_rows, start=2):
-        if len(r) <= max(company_col_idx, link_col_idx):
-            continue
-        comp = r[company_col_idx].strip()
-        title = r[title_col_idx].strip() if title_col_idx < len(r) and r[title_col_idx].strip() else "Job"
-        link = r[link_col_idx].strip()
-        
-        if comp and link and link.startswith("http"):
-            jobs_to_process.append((comp, title, link, r_idx))
-
-    logger.info(f"Found {len(jobs_to_process)} total job links in the Google Sheet.")
-    
-    keyword_filter = sys.argv[1].strip().lower() if len(sys.argv) > 1 and sys.argv[1].strip() else None
+    keyword_filter = None
+    for arg in sys.argv[1:]:
+        if not arg.startswith("--"):
+            keyword_filter = arg.strip().lower()
+            break
     if keyword_filter:
         logger.info(f"Filtering pending jobs for keyword: '{keyword_filter}'")
 
-    # Filter out jobs that already have a dedicated Google Doc
-    pending_jobs = []
-    for comp, title, link, r_idx in jobs_to_process:
-        target_name = f"{comp} - {title}".strip().lower()
-        if target_name not in existing_docs:
-            if keyword_filter:
-                # Only process jobs whose title or company matches the keyword
-                if keyword_filter not in title.lower() and keyword_filter not in comp.lower():
-                    continue
-            pending_jobs.append((comp, title, link, r_idx))
+    headless = os.getenv("HEADLESS", "false").lower() in ("true", "1")
 
-    logger.info(f"{len(pending_jobs)} job(s) pending question extraction.\n")
-
-    if not pending_jobs:
-        logger.info("All jobs from the sheet already have their dedicated Google Docs! Nothing to do.")
-        return
-
-    # 3. Launch stealth browser and process jobs
+    # 3. Launch browser (uses system Chrome for maximum ATS stealth and speed)
     async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=False)
+        try:
+            browser = await p.chromium.launch(
+                channel="chrome",
+                headless=headless,
+                args=["--disable-blink-features=AutomationControlled"]
+            )
+        except Exception:
+            browser = await p.chromium.launch(headless=headless)
+
         context = await browser.new_context(
             viewport={"width": 1280, "height": 800},
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
         )
 
         total_scraped = 0
-        total_failed = 0
+        total_skipped = 0
 
-        for idx, (company, title, url, row_num) in enumerate(pending_jobs, start=1):
-            doc_target_name = f"{company} - {title}"
-            logger.info(f"\n--- [{idx}/{len(pending_jobs)}] {doc_target_name} (Row {row_num}) ---")
-            logger.info(f"URL: {url}")
-            
-            page = await context.new_page()
-            questions = []
-            
+        # Main processing loop
+        while True:
+            # Refresh data from sheet
             try:
-                await page.goto(url, wait_until="domcontentloaded", timeout=40000)
-                await asyncio.sleep(3)
-                await dismiss_popups(page)
+                rows = ws.get_all_values()
+            except Exception as read_err:
+                logger.warning(f"Error fetching sheet rows: {read_err}. Retrying in 5s...")
+                await asyncio.sleep(5)
+                continue
 
-                # Attempt to reach active application form if on landing / description page
-                active_page = await click_apply_button_if_present(page, context)
-                await asyncio.sleep(3)
-                await dismiss_popups(active_page)
-
-                # Scrape questions across all pages of the application form
-                questions = await scrape_all_pages_questions(active_page, context)
+            data_rows = rows[1:] if len(rows) > 1 else []
+            
+            # Find all pending jobs:
+            # A row is pending if:
+            # 1. Company and Job Link are present
+            # 2. Questions Doc Link is empty AND Questions Count is not already evaluated ("0 Questions", "None", or "X Questions")
+            pending_jobs = []
+            for r_idx, r in enumerate(data_rows, start=2):
+                if len(r) <= max(company_col_idx, job_link_col_idx):
+                    continue
+                comp = r[company_col_idx].strip()
+                title = r[title_col_idx].strip() if title_col_idx < len(r) and r[title_col_idx].strip() else "Job"
+                link = r[job_link_col_idx].strip()
                 
-                if questions:
-                    logger.info(f"  [+] Found {len(questions)} total question(s) for {doc_target_name}:")
-                    for q_i, q_item in enumerate(questions[:5], start=1):
-                        prompt = q_item.get("question", "") if isinstance(q_item, dict) else str(q_item)
-                        opts = q_item.get("options", []) if isinstance(q_item, dict) else []
-                        opts_str = f" [Options: {', '.join(opts[:4])}{'...' if len(opts)>4 else ''}]" if opts else ""
-                        logger.info(f"      Q{q_i}: {prompt[:80]}{opts_str}")
-                    if len(questions) > 5:
-                        logger.info(f"      ... and {len(questions) - 5} more questions.")
+                doc_link = r[doc_link_col_idx].strip() if doc_link_col_idx < len(r) else ""
+                count_val = r[count_col_idx].strip() if count_col_idx < len(r) else ""
 
-                    # Create dedicated Google Doc named '{company} - {job_title}'
-                    doc_res = google_doc_writer.create_job_question_doc(
-                        company, title, url, questions, drive_service=drive_service
-                    )
-                    
-                    if doc_res and doc_res.get("url"):
-                        logger.info(f"  [✔] Successfully created Google Doc: {doc_res['name']}")
-                        logger.info(f"      Link: {doc_res['url']}")
-                        existing_docs[doc_res["name"].strip().lower()] = doc_res["id"]
+                if not comp or not link or not link.startswith("http"):
+                    continue
+
+                if keyword_filter and (keyword_filter not in title.lower() and keyword_filter not in comp.lower()):
+                    continue
+
+                # Check if this row is already complete
+                is_evaluated = bool(doc_link and doc_link.startswith("http")) or (count_val in ("0 Questions", "N/A", "-") and doc_link in ("-", "N/A"))
+                if not is_evaluated:
+                    pending_jobs.append((comp, title, link, doc_link, count_val, r_idx))
+
+            if pending_jobs:
+                logger.info(f"\n--- Found {len(pending_jobs)} job(s) pending form question extraction ---")
+
+                for idx, (company, title, url, existing_doc_link, count_val, row_num) in enumerate(pending_jobs, start=1):
+                    doc_target_name = f"{company} - {title}".strip()
+                    target_key = doc_target_name.lower()
+
+                    logger.info(f"\n[{idx}/{len(pending_jobs)}] {doc_target_name} (Row {row_num})")
+                    logger.info(f"URL: {url}")
+
+                    # Case A: Check if a dedicated Google Doc already exists in Drive for this job
+                    if target_key in existing_docs:
+                        existing_entry = existing_docs[target_key]
+                        doc_url = existing_entry.get("url") if isinstance(existing_entry, dict) else f"https://docs.google.com/document/d/{existing_entry}/edit"
+                        logger.info(f"  [✔] Found existing Google Doc on Drive: {doc_url}")
+                        q_cnt = count_val if count_val and count_val != "None" else "Questions"
+                        update_sheet_row(ws, row_num, doc_link_col_idx, count_col_idx, doc_url, q_cnt)
                         total_scraped += 1
-                    else:
-                        logger.warning(f"  [!] Failed to create Google Doc for {doc_target_name}.")
-                else:
-                    logger.info(f"  [-] No custom questions found on form for {doc_target_name}.")
-                    total_failed += 1
+                        continue
 
-            except Exception as e:
-                logger.error(f"  [✖] Error extracting questions for {doc_target_name}: {e}")
-                total_failed += 1
-            finally:
-                # Close any extra tabs opened for this job
-                for p_tab in list(context.pages):
+                    # Case B: Scrape the application page for questions
+                    page = await context.new_page()
+                    questions = []
+                    
                     try:
-                        await p_tab.close()
-                    except Exception:
-                        pass
+                        await page.goto(url, wait_until="domcontentloaded", timeout=40000)
+                        await asyncio.sleep(2.5)
+                        await dismiss_popups(page)
+
+                        # Attempt to reach active application form if on landing / description page
+                        active_page = await click_apply_button_if_present(page, context)
+                        await asyncio.sleep(2.5)
+                        await dismiss_popups(active_page)
+
+                        # Scrape questions across all pages of the application form
+                        questions = await scrape_all_pages_questions(active_page, context)
+
+                        if questions:
+                            logger.info(f"  [+] Extracted {len(questions)} question(s) for {doc_target_name}:")
+                            for q_i, q_item in enumerate(questions[:4], start=1):
+                                prompt = q_item.get("question", "") if isinstance(q_item, dict) else str(q_item)
+                                opts = q_item.get("options", []) if isinstance(q_item, dict) else []
+                                opts_str = f" [Options: {', '.join(opts[:3])}{'...' if len(opts)>3 else ''}]" if opts else ""
+                                logger.info(f"      Q{q_i}: {prompt[:80]}{opts_str}")
+                            if len(questions) > 4:
+                                logger.info(f"      ... and {len(questions) - 4} more questions.")
+
+                            # Create dedicated Google Doc named '{company} - {job_title}'
+                            doc_res = google_doc_writer.create_job_question_doc(
+                                company, title, url, questions, drive_service=drive_service
+                            )
+
+                            if doc_res and doc_res.get("url"):
+                                doc_url = doc_res["url"]
+                                count_str = f"{len(questions)} Questions"
+                                logger.info(f"  [✔] Google Doc Created: {doc_res['name']}")
+                                logger.info(f"      Link: {doc_url}")
+                                existing_docs[target_key] = doc_res
+                                update_sheet_row(ws, row_num, doc_link_col_idx, count_col_idx, doc_url, count_str)
+                                total_scraped += 1
+                            else:
+                                logger.warning(f"  [!] Failed to create Google Doc for {doc_target_name}.")
+                                update_sheet_row(ws, row_num, doc_link_col_idx, count_col_idx, "-", f"{len(questions)} Questions")
+                                total_skipped += 1
+                        else:
+                            logger.info(f"  [-] No custom employer questions found on application form.")
+                            update_sheet_row(ws, row_num, doc_link_col_idx, count_col_idx, "-", "0 Questions")
+                            total_skipped += 1
+
+                    except Exception as e:
+                        logger.error(f"  [✖] Error extracting questions for {doc_target_name}: {e}")
+                        total_skipped += 1
+                    finally:
+                        # Close any tabs opened during this job's extraction
+                        for p_tab in list(context.pages):
+                            try:
+                                await p_tab.close()
+                            except Exception:
+                                pass
+
+                    await asyncio.sleep(1)
+
+            else:
+                # No pending jobs currently in the sheet
+                if drain_mode:
+                    logger.info("\n[Done] All jobs in the Google Sheet have been processed for questions!")
+                    break
+                else:
+                    logger.info("All current jobs processed. Waiting for new jobs from scrapers (polling sheet in 5s)...")
+                    await asyncio.sleep(5)
 
         await browser.close()
         logger.info("\n==========================================")
-        logger.info(f"Done! {total_scraped} per-job Google Docs created, {total_failed} skipped/no questions.")
+        logger.info(f"Question Scraper finished! Docs created/linked: {total_scraped}, No questions/skipped: {total_skipped}.")
         logger.info("==========================================")
+
 
 def main():
     asyncio.run(run_scraper())

@@ -44,6 +44,10 @@ def get_drive_service(credentials_path: str = None, token_path: str = None, serv
 
 def get_or_create_questions_folder(drive_service, folder_name: str = DEFAULT_FOLDER_NAME) -> str:
     """Finds or creates a folder in Google Drive to hold all per-job question docs."""
+    env_fid = os.getenv("QUESTIONS_DRIVE_FOLDER_ID", "").strip()
+    if env_fid:
+        return env_fid
+
     query = f"mimeType = 'application/vnd.google-apps.folder' and name = '{folder_name}' and trashed = false"
     try:
         res = drive_service.files().list(q=query, spaces='drive', fields='files(id, name)', pageSize=10).execute()
@@ -64,7 +68,7 @@ def get_or_create_questions_folder(drive_service, folder_name: str = DEFAULT_FOL
 
 def get_existing_question_docs(drive_service, folder_id: str = None) -> dict:
     """
-    Returns a dictionary of {doc_name_lower: doc_id} for all existing question docs.
+    Returns a dictionary of {doc_name_lower: {'id': doc_id, 'url': web_link}} for existing question docs.
     """
     existing = {}
     try:
@@ -78,14 +82,16 @@ def get_existing_question_docs(drive_service, folder_id: str = None) -> dict:
             res = drive_service.files().list(
                 q=query,
                 spaces='drive',
-                fields='nextPageToken, files(id, name)',
+                fields='nextPageToken, files(id, name, webViewLink)',
                 pageSize=1000,
                 pageToken=page_token
             ).execute()
             for f in res.get('files', []):
                 name = f.get('name', '').strip().lower()
+                doc_id = f.get('id', '')
+                doc_url = f.get('webViewLink') or f"https://docs.google.com/document/d/{doc_id}/edit"
                 if name:
-                    existing[name] = f.get('id', '')
+                    existing[name] = {"id": doc_id, "url": doc_url}
             page_token = res.get('nextPageToken')
             if not page_token:
                 break

@@ -15,6 +15,15 @@ else:
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 BASE_DIR = os.path.dirname(CURRENT_DIR)
 
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(CURRENT_DIR, ".env"))
+    load_dotenv(os.path.join(CURRENT_DIR, "env"))
+    load_dotenv(os.path.join(BASE_DIR, "Job-bot-launcher", ".env"))
+    load_dotenv(os.path.join(BASE_DIR, "resume-bot", ".env"))
+except Exception:
+    pass
+
 def _find_file(filename):
     candidates = [
         os.path.join(CURRENT_DIR, filename),
@@ -22,6 +31,8 @@ def _find_file(filename):
         os.path.join(getattr(sys, '_MEIPASS', ''), filename) if hasattr(sys, '_MEIPASS') else '',
         os.path.join(os.path.dirname(sys.executable), filename) if getattr(sys, 'frozen', False) else '',
         os.path.join(BASE_DIR, "Job-bot-launcher", filename),
+        os.path.join(BASE_DIR, "resume-bot", filename),
+        os.path.join(BASE_DIR, filename),
     ]
     for c in candidates:
         if c and os.path.exists(c):
@@ -36,58 +47,66 @@ DEFAULT_COVER_LETTER_FOLDER_NAME = "Job Bot Cover Letters"
 DEFAULT_COVER_LETTERS_DIR = os.getenv("COVER_LETTERS_SAVE_PATH", os.path.join(BASE_DIR, "Cover Letters"))
 
 
-def get_drive_service(credentials_path: str = DEFAULT_CREDENTIALS, token_path: str = DEFAULT_TOKEN):
-    """Authenticates the user using OAuth 2.0 and returns the Google Drive service.
+DEFAULT_SERVICE_ACCOUNT = _find_file("service_account.json")
+
+
+def get_drive_service(credentials_path: str = DEFAULT_CREDENTIALS, token_path: str = DEFAULT_TOKEN, sa_path: str = DEFAULT_SERVICE_ACCOUNT):
+    """Authenticates using OAuth 2.0 (token.json/credentials.json) or Service Account (service_account.json).
     
-    Opens the default browser for authorization on the first run and persists
-    the session in token.json for all subsequent automated runs.
+    If OAuth credentials are unverified or blocked, seamlessly falls back to service_account.json
+    so uploads work reliably without Google verification walls.
     """
-    creds = None
+    # 1. First priority: Check existing authorized token.json
     if os.path.exists(token_path):
         try:
             creds = Credentials.from_authorized_user_file(token_path, SCOPES)
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            if creds and creds.valid:
+                return build('drive', 'v3', credentials=creds, static_discovery=False, cache_discovery=False)
         except Exception as e:
             print(f"[Drive] Warning: Could not load existing token: {e}")
-            creds = None
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            try:
-                print("[Drive] Refreshing expired OAuth token...")
-                creds.refresh(Request())
-            except Exception as e:
-                print(f"[Drive] Failed to refresh token ({e}), re-authenticating...")
-                creds = None
-
-        if not creds:
-            if not os.path.exists(credentials_path):
-                raise FileNotFoundError(
-                    f"Google Drive OAuth credentials file not found at: {credentials_path}\n"
-                    "Please ensure credentials.json is saved in the Job-bot-launcher folder."
-                )
+    # 2. Try credentials.json (OAuth) first so uploaded files use your personal Drive storage quota
+    if os.path.exists(credentials_path):
+        try:
             print("[Drive] Initiating browser login for Google Drive...")
             print("[Drive] A browser tab will open. Please sign in and allow access to Google Drive.")
             flow = InstalledAppFlow.from_client_secrets_file(credentials_path, SCOPES)
             creds = flow.run_local_server(port=0)
+            try:
+                with open(token_path, 'w', encoding='utf-8') as token_file:
+                    token_file.write(creds.to_json())
+                print(f"[Drive] Saved authentication token to {token_path}")
+            except Exception as e:
+                print(f"[Drive] Warning: Could not save token.json: {e}")
+            return build('drive', 'v3', credentials=creds, static_discovery=False, cache_discovery=False)
+        except Exception as oauth_err:
+            print(f"[Drive] OAuth browser login failed: {oauth_err}")
 
-        # Save credentials for future executions
+    # 3. Fallback to service_account.json
+    if os.path.exists(sa_path):
         try:
-            with open(token_path, 'w', encoding='utf-8') as token_file:
-                token_file.write(creds.to_json())
-            print(f"[Drive] Saved authentication token to {token_path}")
-        except Exception as e:
-            print(f"[Drive] Warning: Could not save token.json: {e}")
+            from google.oauth2 import service_account as g_sa
+            creds = g_sa.Credentials.from_service_account_file(sa_path, scopes=SCOPES)
+            return build('drive', 'v3', credentials=creds, static_discovery=False, cache_discovery=False)
+        except Exception as sa_err:
+            print(f"[Drive] Service account connection error: {sa_err}")
 
-    return build('drive', 'v3', credentials=creds, static_discovery=False, cache_discovery=False)
+    raise FileNotFoundError(
+        f"Google Drive authentication failed. Please ensure service_account.json or credentials.json is present."
+    )
 
 
 def get_or_create_folder(service, folder_name: str = DEFAULT_FOLDER_NAME, parent_id: str = None) -> str:
     """Finds an existing folder by name on Google Drive or creates it if it doesn't exist."""
+    safe_name = folder_name.replace("'", "\\'")
     if parent_id:
-        query = f"mimeType = 'application/vnd.google-apps.folder' and name = '{folder_name}' and '{parent_id}' in parents and trashed = false"
+        query = f"mimeType = 'application/vnd.google-apps.folder' and name = '{safe_name}' and '{parent_id}' in parents and trashed = false"
     else:
         alt_name = folder_name.replace("Job Bot ", "").strip()
-        query = f"mimeType = 'application/vnd.google-apps.folder' and (name = '{folder_name}' or name = '{alt_name}') and trashed = false"
+        safe_alt = alt_name.replace("'", "\\'")
+        query = f"mimeType = 'application/vnd.google-apps.folder' and (name = '{safe_name}' or name = '{safe_alt}') and trashed = false"
 
     try:
         results = service.files().list(
@@ -132,9 +151,10 @@ def upload_file_to_drive(service, file_path: str, folder_id: str, overwrite: boo
         raise FileNotFoundError(f"File to upload not found: {file_path}")
 
     file_name = os.path.basename(file_path)
+    safe_file_name = file_name.replace("'", "\\'")
     
     # Check if file with same name already exists in this folder
-    query = f"name = '{file_name}' and '{folder_id}' in parents and trashed = false"
+    query = f"name = '{safe_file_name}' and '{folder_id}' in parents and trashed = false"
     existing = service.files().list(
         q=query,
         spaces='drive',
@@ -144,6 +164,7 @@ def upload_file_to_drive(service, file_path: str, folder_id: str, overwrite: boo
 
     media = MediaFileUpload(file_path, mimetype='application/pdf', resumable=True)
 
+    target_file = None
     if existing:
         if overwrite:
             existing_id = existing[0]['id']
@@ -154,28 +175,45 @@ def upload_file_to_drive(service, file_path: str, folder_id: str, overwrite: boo
                 fields='id, name, webViewLink'
             ).execute()
             print(f"[Drive] Updated: {file_name} -> {updated.get('webViewLink', '')}")
-            return updated
+            target_file = updated
         else:
             print(f"[Drive] File '{file_name}' already exists in folder, skipping.")
-            return existing[0]
+            target_file = existing[0]
+    else:
+        # Create new file
+        file_metadata = {
+            'name': file_name,
+            'parents': [folder_id]
+        }
+        created = service.files().create(
+            body=file_metadata,
+            media_body=media,
+            fields='id, name, webViewLink'
+        ).execute()
+        print(f"[Drive] Uploaded: {file_name} -> {created.get('webViewLink', '')}")
+        target_file = created
 
-    # Create new file
-    file_metadata = {
-        'name': file_name,
-        'parents': [folder_id]
-    }
-    created = service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields='id, name, webViewLink'
-    ).execute()
-    print(f"[Drive] Uploaded: {file_name} -> {created.get('webViewLink', '')}")
-    return created
+    # Ensure the file has reader permissions so clicking the link from the sheet opens directly
+    file_id = target_file.get('id')
+    if file_id:
+        try:
+            service.permissions().create(
+                fileId=file_id,
+                body={'role': 'reader', 'type': 'anyone'},
+                fields='id'
+            ).execute()
+        except Exception:
+            pass
+
+    if not target_file.get('webViewLink') and file_id:
+        target_file['webViewLink'] = f"https://drive.google.com/file/d/{file_id}/view?usp=sharing"
+
+    return target_file
 
 
 def infer_profile_name(file_path_or_name: str) -> str:
     """Infers candidate profile name from folder structure or filename."""
-    # Check parent folder name first (e.g., CVs/Brian Moore/0x.pdf)
+    # Check parent folder name first (e.g., CVs/Brian Moore/Company - Title.pdf)
     parent_dir = os.path.basename(os.path.dirname(os.path.abspath(file_path_or_name)))
     if parent_dir and parent_dir.lower() not in ("cvs", "cvs-old", "cover letters"):
         return parent_dir
@@ -192,20 +230,40 @@ def infer_profile_name(file_path_or_name: str) -> str:
 
 
 def get_or_create_profile_folder(service, profile_name: str, root_folder_name: str = DEFAULT_FOLDER_NAME) -> str:
-    """Gets or creates a profile-specific subfolder (e.g. 'Job Bot CVs/Brian Moore')."""
-    root_id = get_or_create_folder(service, folder_name=root_folder_name)
+    """Gets or creates a profile-specific folder (e.g. 'Brian Moore') inside the root CVs folder on Google Drive."""
+    import re
     clean_profile = profile_name.strip() if profile_name else "General"
-    profile_folder_id = get_or_create_folder(service, folder_name=clean_profile, parent_id=root_id)
-    return profile_folder_id
+
+    # 1. Check if user configured an explicit parent folder ID in .env
+    is_cover = (root_folder_name == DEFAULT_COVER_LETTER_FOLDER_NAME) or ("cover" in (root_folder_name or "").lower())
+    if is_cover:
+        parent_id = os.getenv("COVER_LETTERS_DRIVE_FOLDER_ID") or os.getenv("DRIVE_COVER_LETTER_FOLDER_ID")
+    else:
+        parent_id = os.getenv("RESUMES_DRIVE_FOLDER_ID") or os.getenv("DRIVE_FOLDER_ID")
+
+    if parent_id and "drive.google.com" in parent_id:
+        m = re.search(r'folders/([a-zA-Z0-9_-]+)', parent_id)
+        if m:
+            parent_id = m.group(1)
+
+    # 2. If no explicit folder ID, find or create the root 'Job Bot CVs' folder
+    if not parent_id and root_folder_name:
+        try:
+            parent_id = get_or_create_folder(service, folder_name=root_folder_name)
+        except Exception as e:
+            print(f"[Drive] Warning: Could not locate root folder '{root_folder_name}': {e}")
+            parent_id = None
+
+    # 3. Find or create the candidate profile folder inside that root folder
+    return get_or_create_folder(service, folder_name=clean_profile, parent_id=parent_id)
 
 
 def upload_single_cv(file_path: str, profile_name: str = None, folder_name: str = DEFAULT_FOLDER_NAME) -> dict:
-    """Uploads a single CV or cover letter into its profile's subfolder on Google Drive."""
+    """Uploads a single CV into its profile's folder under 'Job Bot CVs' on Google Drive."""
     service = get_drive_service()
     if not profile_name:
         profile_name = infer_profile_name(file_path)
     
-    # Store inside the profile's subfolder under root
     target_folder_id = get_or_create_profile_folder(service, profile_name, root_folder_name=folder_name)
     return upload_file_to_drive(service, file_path, target_folder_id, overwrite=True)
 
@@ -220,8 +278,8 @@ def upload_single_cover_letter(file_path: str, profile_name: str = None, folder_
     return upload_file_to_drive(service, file_path, target_folder_id, overwrite=True)
 
 
-def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = DEFAULT_FOLDER_NAME, overwrite: bool = True):
-    """Scans the CVs directory (both flat and subfolders) and organizes all CVs into profile subfolders on Drive."""
+def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = None, overwrite: bool = True):
+    """Scans the CVs directory (both flat and subfolders) and organizes all CVs into profile folders on Drive."""
     if not os.path.exists(cvs_dir):
         print(f"[Drive] CV directory does not exist: {cvs_dir}")
         return 0
@@ -243,7 +301,7 @@ def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = DEFAULT_FO
     for idx, full_path in enumerate(all_pdfs, start=1):
         fname = os.path.basename(full_path)
         profile_name = infer_profile_name(full_path)
-        print(f"[{idx}/{len(all_pdfs)}] [{profile_name}] Uploading {fname}...")
+        print(f"[{idx}/{len(all_pdfs)}] [{profile_name}] Uploading {fname} to folder '{profile_name}'...")
         try:
             target_folder_id = get_or_create_profile_folder(service, profile_name, root_folder_name=folder_name)
             upload_file_to_drive(service, full_path, target_folder_id, overwrite=overwrite)
@@ -251,7 +309,7 @@ def upload_all_cvs(cvs_dir: str = DEFAULT_CVS_DIR, folder_name: str = DEFAULT_FO
         except Exception as e:
             print(f"  [Error] Failed to upload {fname} for {profile_name}: {e}")
 
-    print(f"\n[Drive] Done! Successfully organized {success_count}/{len(all_pdfs)} files into profile folders in '{folder_name}'.")
+    print(f"\n[Drive] Done! Successfully organized {success_count}/{len(all_pdfs)} files into profile folders.")
     return success_count
 
 

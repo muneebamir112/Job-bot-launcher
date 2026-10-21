@@ -1,5 +1,6 @@
 import os
 import sys
+import subprocess
 
 # Allow execution from launcher without security alert
 os.environ["JOBBOT_LAUNCHER_AUTH"] = "1"
@@ -11,7 +12,12 @@ else:
     CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
     
 BASE_DIR = os.path.dirname(CURRENT_DIR)
-PROFILE_DIR = os.path.join(BASE_DIR, "scraper", "GlassD", "profiles", "glassdoor_profile")
+candidates = [
+    os.path.join(BASE_DIR, "scrapper-bot", "GlassD", "profiles", "glassdoor_profile"),
+    os.path.join(BASE_DIR, "scraper", "GlassD", "profiles", "glassdoor_profile"),
+]
+PROFILE_DIR = next((p for p in candidates if os.path.exists(os.path.dirname(p))), candidates[0])
+os.makedirs(PROFILE_DIR, exist_ok=True)
 
 def find_chrome():
     paths = [
@@ -27,11 +33,11 @@ def find_chrome():
     return None
 
 def main():
-    try:
-        from patchright.sync_api import sync_playwright
-    except ImportError:
-        print("patchright is not installed.")
+    chrome_path = find_chrome()
+    if not chrome_path:
+        print("Google Chrome was not found on this system. Please install Google Chrome.")
         sys.exit(1)
+
     print(f"Profile Directory: {PROFILE_DIR}")
     cmd = [
         chrome_path,

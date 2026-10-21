@@ -224,10 +224,36 @@ def filter_cleaned_questions(raw_items):
 # ==============================================================================
 
 async def dismiss_popups_async(page):
+    dismiss_js = """() => {
+        const selectors = [
+            '#onetrust-accept-btn-handler', 'button#onetrust-accept-btn-handler',
+            '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+            '#CybotCookiebotDialogBodyButtonAccept', '#didomi-notice-agree-button',
+            '.osano-cm-accept-all', '#truste-consent-button', '[data-testid="uc-accept-all-button"]',
+            'button[id*="cookie-accept" i]', 'button[class*="cookie-accept" i]'
+        ];
+        for (const s of selectors) {
+            try {
+                const el = document.querySelector(s);
+                if (el && (el.offsetParent !== null || el.getBoundingClientRect().height > 0)) {
+                    el.click();
+                    return true;
+                }
+            } catch (e) {}
+        }
+        return false;
+    }"""
+    try:
+        await page.evaluate(dismiss_js)
+    except Exception:
+        pass
+
     selectors = [
-        "button:has-text('Accept All')", "button:has-text('Accept Cookies')",
-        "button:has-text('I agree')", "button:has-text('Got it')",
-        "button:has-text('Dismiss')", "button[aria-label='Close']",
+        "button:has-text('Accept all cookies')", "button:has-text('Accept All Cookies')",
+        "button:has-text('Accept All')", "button:has-text('Accept all')",
+        "button:has-text('Accept Cookies')", "button:has-text('Allow all cookies')",
+        "button:has-text('Allow All')", "button:has-text('I agree')", "button:has-text('I Agree')",
+        "button:has-text('Got it')", "button:has-text('Dismiss')", "button[aria-label='Close']",
         "button.close", ".close-modal"
     ]
     for s in selectors:
@@ -235,6 +261,9 @@ async def dismiss_popups_async(page):
             for el in await page.locator(s).all():
                 if await el.is_visible():
                     await el.click(timeout=1000)
+                    import asyncio
+                    await asyncio.sleep(0.3)
+                    break
         except Exception:
             pass
 
@@ -405,10 +434,36 @@ async def extract_questions_and_create_doc_async(page, context, company, title, 
 # ==============================================================================
 
 def dismiss_popups_sync(page):
+    dismiss_js = """() => {
+        const selectors = [
+            '#onetrust-accept-btn-handler', 'button#onetrust-accept-btn-handler',
+            '#CybotCookiebotDialogBodyLevelButtonLevelOptinAllowAll',
+            '#CybotCookiebotDialogBodyButtonAccept', '#didomi-notice-agree-button',
+            '.osano-cm-accept-all', '#truste-consent-button', '[data-testid="uc-accept-all-button"]',
+            'button[id*="cookie-accept" i]', 'button[class*="cookie-accept" i]'
+        ];
+        for (const s of selectors) {
+            try {
+                const el = document.querySelector(s);
+                if (el && (el.offsetParent !== null || el.getBoundingClientRect().height > 0)) {
+                    el.click();
+                    return true;
+                }
+            } catch (e) {}
+        }
+        return false;
+    }"""
+    try:
+        page.evaluate(dismiss_js)
+    except Exception:
+        pass
+
     selectors = [
-        "button:has-text('Accept All')", "button:has-text('Accept Cookies')",
-        "button:has-text('I agree')", "button:has-text('Got it')",
-        "button:has-text('Dismiss')", "button[aria-label='Close']",
+        "button:has-text('Accept all cookies')", "button:has-text('Accept All Cookies')",
+        "button:has-text('Accept All')", "button:has-text('Accept all')",
+        "button:has-text('Accept Cookies')", "button:has-text('Allow all cookies')",
+        "button:has-text('Allow All')", "button:has-text('I agree')", "button:has-text('I Agree')",
+        "button:has-text('Got it')", "button:has-text('Dismiss')", "button[aria-label='Close']",
         "button.close", ".close-modal"
     ]
     for s in selectors:
@@ -416,6 +471,9 @@ def dismiss_popups_sync(page):
             for el in page.locator(s).all():
                 if el.is_visible():
                     el.click(timeout=1000)
+                    import time
+                    time.sleep(0.3)
+                    break
         except Exception:
             pass
 

@@ -55,11 +55,34 @@ if getattr(sys, 'frozen', False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
     BASE_DIR = os.path.dirname(CURRENT_DIR)
-GLASSD_DIR = os.path.join(BASE_DIR, "scraper", "GlassD")
-HIRINGCAFE_DIR = os.path.join(BASE_DIR, "scraper", "Hiring_cafe")
-JOBGETHER_DIR = os.path.join(BASE_DIR, "scraper", "Jobgether")
-JOBBOT_DIR = os.path.join(BASE_DIR, "Job-Bot")
-RESUMEBOT_DIR = os.path.join(BASE_DIR, "resume-bot")
+def _find_dir(*candidates):
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return candidates[0]
+
+GLASSD_DIR = _find_dir(
+    os.path.join(BASE_DIR, "scrapper-bot", "GlassD"),
+    os.path.join(BASE_DIR, "scraper", "GlassD"),
+    os.path.join(BASE_DIR, "GlassD"),
+)
+HIRINGCAFE_DIR = _find_dir(
+    os.path.join(BASE_DIR, "scrapper-bot", "Hiring_cafe"),
+    os.path.join(BASE_DIR, "scraper", "Hiring_cafe"),
+    os.path.join(BASE_DIR, "Hiring_cafe"),
+)
+JOBGETHER_DIR = _find_dir(
+    os.path.join(BASE_DIR, "scrapper-bot", "Jobgether"),
+    os.path.join(BASE_DIR, "scraper", "Jobgether"),
+    os.path.join(BASE_DIR, "Jobgether"),
+)
+JOBBOT_DIR = _find_dir(
+    os.path.join(BASE_DIR, "Job-Application-Bot"),
+    os.path.join(BASE_DIR, "Job-Bot"),
+)
+RESUMEBOT_DIR = _find_dir(
+    os.path.join(BASE_DIR, "resume-bot"),
+)
 if getattr(sys, 'frozen', False):
     LOGS_DIR = os.path.join(os.path.dirname(sys.executable), "logs")
 else:
@@ -69,6 +92,13 @@ else:
 # already exists for a company (see ResumeBotPanel._run).
 CVS_DIR = os.getenv("RESUMES_SAVE_PATH", os.path.join(BASE_DIR, "CVs"))
 APP_VERSION = "1.0.0"
+
+def _has_drive_credentials():
+    for f in ["credentials.json", "token.json"]:
+        for d in [CURRENT_DIR, BASE_DIR, os.path.join(BASE_DIR, "Job-bot-launcher"), os.path.join(BASE_DIR, "resume-bot")]:
+            if os.path.exists(os.path.join(d, f)):
+                return True
+    return False
 
 from dotenv import load_dotenv
 load_dotenv(os.path.join(CURRENT_DIR, ".env"))
@@ -109,7 +139,15 @@ def stamp_log_line(text):
     leading_newlines = text[:len(text) - len(stripped)]
     if not stripped:
         return text
-    return f"{leading_newlines}[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {stripped}"
+    # If already formatted with [YYYY-MM-DD HH:MM:SS]
+    if re.match(r"^\[\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\]", stripped):
+        return text
+    # If starts with Python logging style: YYYY-MM-DD HH:MM:SS,123 [LEVEL] message
+    m = re.match(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)?\s+(.*)", stripped, re.DOTALL)
+    if m:
+        return f"{leading_newlines}[{m.group(1)}] {m.group(2)}"
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"{leading_newlines}[{now_str}] {stripped}"
 
 
 def format_duration(td):
@@ -295,11 +333,7 @@ class BotPanel(tk.Frame):
         return [sys.executable, "-u", self.script_name]
 
     def _append_log(self, text):
-        # Panels using the per-run timestamped-file mode stamp every line
-        # (on-screen and in the file) so the file's own content shows
-        # exactly when each event happened; the older single-appended-file
-        # mode (log_file=) leaves text unstamped, matching its prior behavior.
-        display_text = stamp_log_line(text) if self._log_dir else text
+        display_text = stamp_log_line(text)
         self.log_box.configure(state="normal")
         self.log_box.insert("end", display_text)
         self.log_box.see("end")
@@ -518,6 +552,51 @@ def get_available_profiles():
                         
     return profiles
 
+COOKIE_PATTERNS = [
+    re.compile(r"we use cookies", re.IGNORECASE),
+    re.compile(r"cookie policy", re.IGNORECASE),
+    re.compile(r"cookie preferences", re.IGNORECASE),
+    re.compile(r"accept all cookies", re.IGNORECASE),
+    re.compile(r"accept cookies", re.IGNORECASE),
+    re.compile(r"strictly necessary cookies", re.IGNORECASE),
+    re.compile(r"by clicking [\"']?accept[\"']?", re.IGNORECASE),
+    re.compile(r"privacy policy.*cookies", re.IGNORECASE),
+    re.compile(r"manage preferences", re.IGNORECASE),
+    re.compile(r"consent to the use of cookies", re.IGNORECASE),
+]
+
+JOB_SIGNALS = [
+    re.compile(r"requirements?", re.IGNORECASE),
+    re.compile(r"responsibilities", re.IGNORECASE),
+    re.compile(r"qualifications?", re.IGNORECASE),
+    re.compile(r"experience", re.IGNORECASE),
+    re.compile(r"about the role", re.IGNORECASE),
+    re.compile(r"about the job", re.IGNORECASE),
+    re.compile(r"what you(?:'ll| will) do", re.IGNORECASE),
+    re.compile(r"what we(?:'re| are) looking for", re.IGNORECASE),
+    re.compile(r"skills?", re.IGNORECASE),
+    re.compile(r"salary", re.IGNORECASE),
+    re.compile(r"benefits?", re.IGNORECASE),
+]
+
+
+def looks_like_cookie_banner(text: str) -> bool:
+    t = text.strip() if text else ""
+    if not t:
+        return False
+    cookie_matches = sum(1 for p in COOKIE_PATTERNS if p.search(t))
+    job_matches = sum(1 for p in JOB_SIGNALS if p.search(t))
+    if cookie_matches >= 2 and job_matches == 0:
+        return True
+    if cookie_matches >= 3 and job_matches <= 1:
+        return True
+    if len(t) < 800 and ("cookie" in t.lower() or "consent" in t.lower()) and job_matches == 0:
+        return True
+    if t.lower().startswith("we use cookies") and job_matches == 0:
+        return True
+    return False
+
+
 class ResumeBotPanel(BotPanel):
     """Instead of pasting one job posting URL at a time, this panel reads
     every row's Company Name + Job Link straight from the same Google Sheet
@@ -617,8 +696,8 @@ class ResumeBotPanel(BotPanel):
                         if os.path.abspath(fp) != os.path.abspath(dest1):
                             shutil.copy(fp, dest1)
                     else:
-                        dest1 = os.path.join("..", "Job-Bot", "profiles", f"{prof_name}.json")
-                        dest2 = os.path.join("..", "resume-bot", "profiles", f"{prof_name}.json")
+                        dest1 = os.path.join(JOBBOT_DIR, "profiles", f"{prof_name}.json")
+                        dest2 = os.path.join(RESUMEBOT_DIR, "profiles", f"{prof_name}.json")
                         
                         os.makedirs(os.path.dirname(dest1), exist_ok=True)
                         os.makedirs(os.path.dirname(dest2), exist_ok=True)
@@ -637,7 +716,7 @@ class ResumeBotPanel(BotPanel):
                     # Initialize Google Drive folder in a background thread so UI doesn't block
                     def _init_drive_cv(p_name):
                         try:
-                            if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                            if _has_drive_credentials():
                                 import google_drive_uploader
                                 drive_service = google_drive_uploader.get_drive_service()
                                 google_drive_uploader.get_or_create_profile_folder(drive_service, p_name)
@@ -759,16 +838,17 @@ class ResumeBotPanel(BotPanel):
             file_only = True
             text = text.replace("[FILE_ONLY]", "")
             
+        stamped_text = stamp_log_line(text)
+
         if not file_only:
             def _do():
                 self.log_box.configure(state="normal")
-                self.log_box.insert("end", text)
+                self.log_box.insert("end", stamped_text)
                 self.log_box.see("end")
                 self.log_box.configure(state="disabled")
             self.after(0, _do)
             
         if self._log_fh:
-            stamped_text = stamp_log_line(text)
             self._log_fh.write(stamped_text)
             self._log_fh.flush()
 
@@ -824,7 +904,8 @@ class ResumeBotPanel(BotPanel):
 
     BASE_COLUMNS = {
         "no.", "company name", "job title", "location", "job age",
-        "job link", "date posted", "date added", "platform", "job description", "status"
+        "job link", "date posted", "date added", "platform", "job description", "status",
+        "questions doc link", "questions count", "question count", "questions doc", "questions",
     }
 
     @staticmethod
@@ -848,12 +929,12 @@ class ResumeBotPanel(BotPanel):
     def _first_profile_col(self, headers):
         """0-based column where candidate profile names start.
         Candidate profiles are placed after the Job Description / base job fields.
-        Finds the first non-empty header after Job Description that is not a base column."""
+        Finds the first non-empty header after Job Description that is not a base column and not a cover letter column."""
         d = self._description_col(headers)
         search_start = (d + 1) if d is not None else 8
         for idx in range(search_start, len(headers)):
             clean = str(headers[idx]).strip().lower()
-            if clean and clean not in self.BASE_COLUMNS:
+            if clean and clean not in self.BASE_COLUMNS and "cover letter" not in clean:
                 return idx
         return search_start
 
@@ -982,6 +1063,34 @@ class ResumeBotPanel(BotPanel):
         self._current_proc = None
         return None if self._stop_requested else code
 
+    def _resume_exists(self, profile_name, company, job_title=""):
+        clean_c = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(company)).strip()
+        clean_t = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(job_title)).strip()
+        prof_dir = os.path.join(CVS_DIR, profile_name)
+        
+        candidates = [
+            os.path.join(prof_dir, f"{clean_c} - {clean_t}.pdf") if clean_t else "",
+            os.path.join(prof_dir, f"{company} - {job_title}.pdf") if job_title else "",
+            os.path.join(prof_dir, f"{profile_name} - {company}.pdf"),
+            os.path.join(CVS_DIR, f"{profile_name} - {company}.pdf"),
+            os.path.join(prof_dir, f"{clean_c}.pdf"),
+        ]
+        for c in candidates:
+            if c and os.path.exists(c):
+                return True
+                
+        if os.path.isdir(prof_dir) and clean_c:
+            c_low = clean_c.lower()
+            try:
+                for f in os.listdir(prof_dir):
+                    if f.lower().endswith(".pdf"):
+                        f_clean = re.sub(r'[<>:"/\\|?*\n\r\t]', '', f).lower()
+                        if f_clean.startswith(f"{c_low} - ") or f_clean.startswith(f"{company.lower()} - "):
+                            return True
+            except Exception:
+                pass
+        return False
+
     def _run(self):
         while not self._stop_requested:
             try:
@@ -1015,7 +1124,11 @@ class ResumeBotPanel(BotPanel):
             else:
                 # Candidate columns start right after the "Job Description" column
                 start = self._first_profile_col(headers)
-                profile_names = headers[start:start + num_profiles]
+                candidate_cols = [
+                    h for h in headers[start:]
+                    if h and str(h).strip().lower() not in self.BASE_COLUMNS and "cover letter" not in str(h).strip().lower()
+                ]
+                profile_names = candidate_cols[:num_profiles]
 
             # Track which companies each profile ALREADY has a resume for in the sheet
             company_done_by_profile = {p: set() for p in profile_names}
@@ -1028,14 +1141,18 @@ class ResumeBotPanel(BotPanel):
                         h_idx = headers.index(profile_name)
                         if h_idx < len(r_data):
                             st = r_data[h_idx].strip().lower()
-                            if ("resume" in st) or (st in ("applied", "submitted", "generated", "human attention")):
+                            if ("resume" in st) or (st in ("applied", "submitted", "generated", "human attention")) or st.startswith("http://") or st.startswith("https://") or "drive.google.com" in st:
                                 company_done_by_profile[profile_name].add(norm_c)
                     except ValueError:
                         pass
 
+            col_map = self._col_mapping(headers)
+            title_idx = col_map.get("job title", 2)
+
             todo = []
             queued_companies_by_profile = {p: set() for p in profile_names}
             for company, link, row, row_data in jobs:
+                job_title = row_data[title_idx].strip() if title_idx < len(row_data) else ""
                 norm_c = self._normalize_company(company)
                 for profile_name in profile_names:
                     try:
@@ -1046,8 +1163,8 @@ class ResumeBotPanel(BotPanel):
                         if header_idx < len(row_data):
                             sheet_status = row_data[header_idx].strip().lower()
                             
-                        # Check if the Google Sheet already says resume is done
-                        if sheet_status in ("applied", "submitted", "human attention") or "resume" in sheet_status or sheet_status == "generated":
+                        # Check if the Google Sheet already says resume is done or contains resume Drive URL
+                        if sheet_status in ("applied", "submitted", "human attention") or "resume" in sheet_status or sheet_status == "generated" or sheet_status.startswith("http://") or sheet_status.startswith("https://") or "drive.google.com" in sheet_status:
                             continue
                             
                     except ValueError:
@@ -1058,10 +1175,8 @@ class ResumeBotPanel(BotPanel):
                         if norm_c in company_done_by_profile.get(profile_name, set()) or norm_c in queued_companies_by_profile.get(profile_name, set()):
                             continue
 
-                    pdf_path = os.path.join(CVS_DIR, f"{profile_name} - {company}.pdf")
-                    pdf_nested = os.path.join(CVS_DIR, profile_name, f"{profile_name} - {company}.pdf")
-                    if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested)):
-                        todo.append((company, link, row, profile_name, col_index, row_data))
+                    if not self._resume_exists(profile_name, company, job_title):
+                        todo.append((company, link, row, profile_name, col_index, row_data, job_title))
                         if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
                             queued_companies_by_profile[profile_name].add(norm_c)
 
@@ -1073,14 +1188,14 @@ class ResumeBotPanel(BotPanel):
 
             descriptions = self._load_descriptions(sheet, headers, [t[2] for t in todo])
             made = failed = 0
-            for idx, (company, link, row, profile_name, col_index, row_data) in enumerate(todo, start=1):
+            for idx, (company, link, row, profile_name, col_index, row_data, job_title) in enumerate(todo, start=1):
                 if self._stop_requested:
                     break
 
                 self._append_log(f"\n--- [{idx}/{len(todo)}] {company} for {profile_name} ---\n")
 
                 stored = descriptions.get(row, "")
-                if len(stored) >= self.MIN_JD_CHARS:
+                if len(stored) >= self.MIN_JD_CHARS and not looks_like_cookie_banner(stored):
                     jd_filename = f"jd_{hashlib.sha1(link.encode('utf-8')).hexdigest()[:12]}.txt"
                     jd_path = os.path.join(self.cwd, jd_filename)
                     with open(jd_path, "w", encoding="utf-8") as f:
@@ -1122,7 +1237,8 @@ class ResumeBotPanel(BotPanel):
                     jd_path = os.path.join(self.cwd, jd_filename)
                     try:
                         with open(jd_path, encoding="utf-8") as f:
-                            jd_len = len(f.read().strip())
+                            jd_content = f.read().strip()
+                            jd_len = len(jd_content)
                     except OSError as e:
                         self._append_log(f"  Could not read {jd_filename}: {e}, skipping.\n")
                         try:
@@ -1131,10 +1247,10 @@ class ResumeBotPanel(BotPanel):
                             pass
                         failed += 1
                         continue
-                    if jd_len < self.MIN_JD_CHARS:
+                    if jd_len < self.MIN_JD_CHARS or looks_like_cookie_banner(jd_content):
                         self._append_log(
-                            f"  Job description is only {jd_len} characters. This usually "
-                            f"indicates an expired job link (404) or consent wall. "
+                            f"  Job description is only {jd_len} characters or is a cookie banner. "
+                            f"This usually indicates an expired job link (404) or consent wall. "
                             f"Skipping resume generation to prevent garbage data.\n"
                         )
                         try:
@@ -1152,8 +1268,8 @@ class ResumeBotPanel(BotPanel):
 
                 model_name = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
                 self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating resume")
-                self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\" \"{model_name}\"\n\n")
-                code = self._run_subprocess(self._get_cmd("ollama_generate.py", jd_filename, company, profile_name, model_name))
+                self._append_log(f"\n$ ollama_generate.py {jd_filename} \"{company}\" \"{profile_name}\" \"{model_name}\" \"{job_title}\"\n\n")
+                code = self._run_subprocess(self._get_cmd("ollama_generate.py", jd_filename, company, profile_name, model_name, job_title))
                 if code is None:
                     break
                 if code != 0:
@@ -1165,28 +1281,59 @@ class ResumeBotPanel(BotPanel):
                     failed += 1
                 else:
                     made += 1
+                    drive_url = ""
+                    # Auto-sync to Google Drive if credentials.json or token.json is present
+                    try:
+                        if _has_drive_credentials():
+                            import google_drive_uploader
+                            clean_c = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(company)).strip()
+                            clean_t = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(job_title)).strip()
+                            cvs_dir = os.getenv("RESUMES_SAVE_PATH", CVS_DIR)
+                            prof_dir = os.path.join(cvs_dir, profile_name)
+                            target_pdf = None
+                            possible_targets = [
+                                os.path.join(prof_dir, f"{clean_c} - {clean_t}.pdf") if clean_t else "",
+                                os.path.join(prof_dir, f"{company} - {job_title}.pdf") if job_title else "",
+                                os.path.join(prof_dir, f"{profile_name} - {company}.pdf"),
+                                os.path.join(cvs_dir, f"{profile_name} - {company}.pdf"),
+                            ]
+                            for pt in possible_targets:
+                                if pt and os.path.exists(pt):
+                                    target_pdf = pt
+                                    break
+                            if not target_pdf and os.path.isdir(prof_dir):
+                                for f in os.listdir(prof_dir):
+                                    if f.lower().endswith(".pdf") and clean_c.lower() in f.lower():
+                                        target_pdf = os.path.join(prof_dir, f)
+                                        break
+                            if target_pdf and os.path.exists(target_pdf):
+                                drive_res = google_drive_uploader.upload_single_cv(target_pdf, profile_name=profile_name)
+                                if drive_res:
+                                    drive_url = drive_res.get("webViewLink") or (f"https://drive.google.com/file/d/{drive_res.get('id')}/view?usp=sharing" if drive_res.get('id') else "")
+                                self._append_log(f"  [✔] Uploaded PDF to Google Drive: {os.path.basename(target_pdf)} ({profile_name})\n")
+                    except Exception as drive_err:
+                        self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
+
+                    # If drive_url not obtained from direct upload, check if subprocess stdout printed it
+                    if not drive_url and hasattr(self, '_last_output') and self._last_output:
+                        m = re.search(r'\[Drive URL\]\s*(https?://[^\s\r\n]+)', self._last_output)
+                        if m:
+                            drive_url = m.group(1).strip()
+
                     try:
                         cur_status = row_data[col_index - 1].strip() if (col_index - 1) < len(row_data) else ""
                         cur_lower = cur_status.lower()
-                        if "cover letter" in cur_lower:
+                        if drive_url:
+                            # Instead of "Resume Generated", paste the URL to that resume
+                            new_status = drive_url
+                        elif "cover letter" in cur_lower:
                             new_status = "Resume & Cover Letter Generated"
                         else:
                             new_status = "Resume Generated"
                         sheet.update_cell(row, col_index, new_status)
-                        self._append_log(f"  [Sheet] Marked '{new_status}' for {profile_name} (row {row})\n")
+                        self._append_log(f"  [Sheet] Added resume link to '{profile_name}' column (row {row}): {new_status}\n")
                     except Exception as e:
-                        self._append_log(f"  Resume was generated but marking the sheet failed: {e}\n")
-
-                    # Auto-sync to Google Drive if credentials.json or token.json is present
-                    try:
-                        if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
-                            import google_drive_uploader
-                            target_pdf = pdf_path if os.path.exists(pdf_path) else os.path.join(CVS_DIR, profile_name, f"{profile_name} - {company}.pdf")
-                            if os.path.exists(target_pdf):
-                                google_drive_uploader.upload_single_cv(target_pdf, profile_name=profile_name)
-                                self._append_log(f"  [Drive] Synced {profile_name} - {company}.pdf to Google Drive ({profile_name} folder)\n")
-                    except Exception as drive_err:
-                        self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
+                        self._append_log(f"  Resume was generated but updating the sheet failed: {e}\n")
                     
                 # Clean up the JD text file regardless of success or failure
                 try:
@@ -1308,7 +1455,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     # Initialize Google Drive folder in a background thread so UI doesn't block
                     def _init_drive_cl(p_name):
                         try:
-                            if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                            if _has_drive_credentials():
                                 import google_drive_uploader
                                 drive_service = google_drive_uploader.get_drive_service()
                                 google_drive_uploader.get_or_create_profile_folder(drive_service, p_name, root_folder_name="Job Bot Cover Letters")
@@ -1405,7 +1552,33 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     except ValueError:
                         num_profiles = 1
                     start = self._first_profile_col(headers)
-                    profile_names = headers[start:start + num_profiles]
+                    candidate_cols = [
+                        h for h in headers[start:]
+                        if h and str(h).strip().lower() not in self.BASE_COLUMNS and "cover letter" not in str(h).strip().lower()
+                    ]
+                    profile_names = candidate_cols[:num_profiles]
+
+                col_map = self._col_mapping(headers)
+                title_idx = col_map.get("job title", 2)
+
+                # Ensure each profile has a dedicated '<Profile> (Cover Letter)' column so Resume links are never overwritten
+                cl_col_indices = {}
+                headers_lower = [str(h).strip().lower() for h in headers]
+                for p in profile_names:
+                    cl_name = f"{p} (Cover Letter)"
+                    if cl_name.lower() in headers_lower:
+                        cl_col_indices[p] = headers_lower.index(cl_name.lower()) + 1
+                    else:
+                        new_col_idx = len(headers) + 1
+                        try:
+                            sheet.update_cell(1, new_col_idx, cl_name)
+                            headers.append(cl_name)
+                            headers_lower.append(cl_name.lower())
+                            cl_col_indices[p] = new_col_idx
+                            self._append_log(f"[+] Added new cover letter column '{cl_name}' to Google Sheet (Col {new_col_idx})!\n")
+                        except Exception as e:
+                            self._append_log(f"[Sheet Warning] Could not add column '{cl_name}': {e}\n")
+                            cl_col_indices[p] = None
 
                 # Track which companies each profile ALREADY has a cover letter for in the sheet
                 cl_done_by_profile = {p: set() for p in profile_names}
@@ -1414,14 +1587,11 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     if not norm_c or norm_c in ("unknown", "n/a", "na", "-"):
                         continue
                     for profile_name in profile_names:
-                        try:
-                            h_idx = headers.index(profile_name)
-                            if h_idx < len(r_data):
-                                st = r_data[h_idx].strip().lower()
-                                if ("cover letter" in st) or (st in ("applied", "submitted")):
-                                    cl_done_by_profile[profile_name].add(norm_c)
-                        except ValueError:
-                            pass
+                        c_col = cl_col_indices.get(profile_name)
+                        if c_col and c_col - 1 < len(r_data):
+                            st = r_data[c_col - 1].strip().lower()
+                            if ("cover letter" in st) or (st in ("applied", "submitted")) or st.startswith("http") or "drive.google.com" in st:
+                                cl_done_by_profile[profile_name].add(norm_c)
 
                 todo = []
                 cl_queued_by_profile = {p: set() for p in profile_names}
@@ -1429,17 +1599,17 @@ class CoverLetterBotPanel(ResumeBotPanel):
                 ALT_COVERLETTER_DIR = os.path.join(BASE_DIR, "CVs")
                 for company, link, row, row_data in jobs:
                     norm_c = self._normalize_company(company)
+                    job_title = row_data[title_idx].strip() if title_idx < len(row_data) else ""
+                    clean_c = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(company)).strip()
+                    clean_t = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(job_title)).strip()
+
                     for profile_name in profile_names:
-                        try:
-                            header_idx = headers.index(profile_name)
-                            col_index = header_idx + 1
-                            sheet_status = ""
-                            if header_idx < len(row_data):
-                                sheet_status = row_data[header_idx].strip().lower()
-                            if sheet_status in ("applied", "submitted") or "cover letter" in sheet_status:
-                                continue
-                        except ValueError:
-                            col_index = None
+                        col_index = cl_col_indices.get(profile_name)
+                        sheet_status = ""
+                        if col_index and col_index - 1 < len(row_data):
+                            sheet_status = row_data[col_index - 1].strip().lower()
+                        if sheet_status in ("applied", "submitted") or "cover letter" in sheet_status or sheet_status.startswith("http") or "drive.google.com" in sheet_status:
+                            continue
 
                         # Skip if this profile already has or has queued a cover letter for this company
                         if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
@@ -1447,12 +1617,16 @@ class CoverLetterBotPanel(ResumeBotPanel):
                                 continue
 
                         # Check if cover letter already exists on disk
-                        pdf_path = os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
-                        pdf_nested = os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
-                        alt_path = os.path.join(ALT_COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf")
-                        alt_nested = os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf")
-                        if not (os.path.exists(pdf_path) or os.path.exists(pdf_nested) or os.path.exists(alt_path) or os.path.exists(alt_nested)):
-                            todo.append((company, link, row, profile_name, col_index, row_data))
+                        candidates = [
+                            os.path.join(COVERLETTER_DIR, profile_name, f"{clean_c} - {clean_t}.pdf") if clean_t else "",
+                            os.path.join(COVERLETTER_DIR, profile_name, f"{company} - {job_title}.pdf") if job_title else "",
+                            os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf"),
+                            os.path.join(COVERLETTER_DIR, f"{clean_c} - {clean_t}.pdf") if clean_t else "",
+                            os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf"),
+                            os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf"),
+                        ]
+                        if not any(c and os.path.exists(c) for c in candidates):
+                            todo.append((company, link, row, profile_name, col_index, row_data, job_title))
                             if norm_c and norm_c not in ("unknown", "n/a", "na", "-"):
                                 cl_queued_by_profile[profile_name].add(norm_c)
 
@@ -1464,7 +1638,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
 
                 descriptions = self._load_descriptions(sheet, headers, [t[2] for t in todo])
                 made = failed = 0
-                for idx, (company, link, row, profile_name, col_index, row_data) in enumerate(todo, start=1):
+                for idx, (company, link, row, profile_name, col_index, row_data, job_title) in enumerate(todo, start=1):
                     if self._stop_requested:
                         break
 
@@ -1474,7 +1648,7 @@ class CoverLetterBotPanel(ResumeBotPanel):
                     jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
 
                     stored = descriptions.get(row, "")
-                    if len(stored) >= self.MIN_JD_CHARS:
+                    if len(stored) >= self.MIN_JD_CHARS and not looks_like_cookie_banner(stored):
                         jd_filename = f"jd_{hashlib.sha1(link.encode('utf-8')).hexdigest()[:12]}.txt"
                         jd_path = os.path.join(RESUMEBOT_DIR, jd_filename)
                         with open(jd_path, "w", encoding="utf-8") as f:
@@ -1504,11 +1678,12 @@ class CoverLetterBotPanel(ResumeBotPanel):
 
                     model_name = os.getenv("OLLAMA_MODEL", "qwen3.5:9b")
                     self._set_status(f"[{idx}/{len(todo)}] {company} ({profile_name}) — generating cover letter")
-                    self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\" \"{model_name}\"\n\n")
+                    self._append_log(f"\n$ batch_generate.py {jd_path} \"{company}\" \"{profile_name}\" \"{model_name}\" \"{job_title}\"\n\n")
                 
                     # Run batch_generate from cover_letter_bot dir
-                    cwd_clbot = BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, "cover_letter_bot")
-                    cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name, model_name)
+                    cl_dir_name = "cover-letter-bot" if os.path.exists(os.path.join(BASE_DIR, "cover-letter-bot")) else "cover_letter_bot"
+                    cwd_clbot = BASE_DIR if getattr(sys, 'frozen', False) else os.path.join(BASE_DIR, cl_dir_name)
+                    cmd_batch = self._get_cmd("batch_generate.py", jd_path, company, profile_name, model_name, job_title)
                 
                     old_cwd = self.cwd
                     self.cwd = cwd_clbot
@@ -1520,40 +1695,41 @@ class CoverLetterBotPanel(ResumeBotPanel):
                         failed += 1
                     else:
                         made += 1
-                        # Mark status in Google Sheet under profile column
-                        if col_index:
-                            try:
-                                header_idx = col_index - 1
-                                cur_status = row_data[header_idx].strip() if header_idx < len(row_data) else ""
-                                cur_lower = cur_status.lower()
-                                if "resume" in cur_lower or cur_lower == "generated":
-                                    new_status = "Resume & Cover Letter Generated"
-                                else:
-                                    new_status = "Cover Letter Generated"
-                                sheet.update_cell(row, col_index, new_status)
-                                self._append_log(f"  [Sheet] Marked '{new_status}' for {profile_name} (row {row})\n")
-                            except Exception as e:
-                                self._append_log(f"  [Sheet Warning] Could not mark sheet: {e}\n")
+                        drive_url = ""
+                        clean_c = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(company)).strip()
+                        clean_t = re.sub(r'[<>:"/\\|?*\n\r\t]', '', str(job_title)).strip()
 
-                        # Auto-sync to Google Drive if credentials.json or token.json is present
+                        # Auto-sync to Google Drive if credentials are present
                         try:
-                            if os.path.exists(os.path.join(CURRENT_DIR, "credentials.json")) or os.path.exists(os.path.join(CURRENT_DIR, "token.json")):
+                            if _has_drive_credentials():
                                 import google_drive_uploader
                                 cl_target = None
                                 for cand_path in [
+                                    os.path.join(COVERLETTER_DIR, profile_name, f"{clean_c} - {clean_t}.pdf") if clean_t else "",
+                                    os.path.join(COVERLETTER_DIR, profile_name, f"{company} - {job_title}.pdf") if job_title else "",
                                     os.path.join(COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf"),
+                                    os.path.join(COVERLETTER_DIR, f"{clean_c} - {clean_t}.pdf") if clean_t else "",
                                     os.path.join(COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf"),
-                                    os.path.join(ALT_COVERLETTER_DIR, profile_name, f"Cover Letter - {profile_name} - {company}.pdf"),
-                                    os.path.join(ALT_COVERLETTER_DIR, f"Cover Letter - {profile_name} - {company}.pdf"),
                                 ]:
-                                    if os.path.exists(cand_path):
+                                    if cand_path and os.path.exists(cand_path):
                                         cl_target = cand_path
                                         break
                                 if cl_target and os.path.exists(cl_target):
-                                    google_drive_uploader.upload_single_cover_letter(cl_target, profile_name=profile_name)
-                                    self._append_log(f"  [Drive] Synced Cover Letter - {profile_name} - {company}.pdf to Google Drive ('Job Bot Cover Letters/{profile_name}' folder)\n")
+                                    upload_res = google_drive_uploader.upload_single_cover_letter(cl_target, profile_name=profile_name)
+                                    if upload_res and isinstance(upload_res, dict):
+                                        drive_url = upload_res.get("webViewLink") or f"https://drive.google.com/file/d/{upload_res.get('id')}/view?usp=sharing"
+                                        self._append_log(f"  [✔] Uploaded PDF to Google Drive: {os.path.basename(cl_target)} ({profile_name}) -> {drive_url}\n")
                         except Exception as drive_err:
                             self._append_log(f"  [Drive Warning] Could not sync to Google Drive: {drive_err}\n")
+
+                        # Mark status or Drive link in Google Sheet under profile's Cover Letter column
+                        if col_index:
+                            try:
+                                cell_val = drive_url if drive_url else "Cover Letter Generated"
+                                sheet.update_cell(row, col_index, cell_val)
+                                self._append_log(f"  [Sheet] Added cover letter link to '{profile_name} (Cover Letter)' column (row {row})\n")
+                            except Exception as e:
+                                self._append_log(f"  [Sheet Warning] Could not mark sheet: {e}\n")
                     
                     # Clean up the JD text file regardless of success or failure
                     try:
@@ -1603,7 +1779,7 @@ class ScraperPanel(tk.Frame):
     ACCENT = ACCENT_PALETTE[2]
     # Folder name (under LOGS_DIR) and log-filename slug per platform.
     PLATFORM_SLUGS = {
-        "Glassdoor": "glassdoor",
+        # "Glassdoor": "glassdoor",
         "Hiring Cafe": "hiring_cafe",
         "Jobgether": "jobgether",
         "Questions": "scrape_questions",
@@ -1653,10 +1829,10 @@ class ScraperPanel(tk.Frame):
         )
         self.edit_kw_btn.pack(side="left", padx=4)
 
-        self.open_profile_btn = ttk.Button(
-            btn_frame, text="Open Profile", width=14, command=self.open_profile, style="Secondary.TButton",
-        )
-        self.open_profile_btn.pack(side="left", padx=4)
+        # self.open_profile_btn = ttk.Button(
+        #     btn_frame, text="Open Profile", width=14, command=self.open_profile, style="Secondary.TButton",
+        # )
+        # self.open_profile_btn.pack(side="left", padx=4)
 
         opt_frame = tk.Frame(self, bg=COLORS["panel_bg"])
         opt_frame.pack(pady=(2, 6))
@@ -1675,7 +1851,10 @@ class ScraperPanel(tk.Frame):
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=10, pady=(0, 10))
         self.log_boxes = {}
-        for label in ("Glassdoor", "Hiring Cafe", "Jobgether", "Questions"):
+        for label in (
+            # "Glassdoor",
+            "Hiring Cafe", "Jobgether", "Questions"
+        ):
             tab = tk.Frame(self.notebook, bg=COLORS["input_bg"])
             box = scrolledtext.ScrolledText(
                 tab, width=58, height=28, state="disabled", bg=COLORS["input_bg"], fg=COLORS["text"],
@@ -2068,13 +2247,78 @@ class ScraperPanel(tk.Frame):
                     self._log_platform(label, f"  {title} | {location}: did not finish cleanly\n")
 
         platform_configs = [
-            ("Glassdoor", BASE_DIR if getattr(sys, 'frozen', False) else GLASSD_DIR,
-             lambda t, l: [sys.executable, "glassdoor", t, l] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", t, l]),
+            # ("Glassdoor", BASE_DIR if getattr(sys, 'frozen', False) else GLASSD_DIR,
+            #  lambda t, l: [sys.executable, "glassdoor", t, l] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", t, l]),
             ("Hiring Cafe", BASE_DIR if getattr(sys, 'frozen', False) else HIRINGCAFE_DIR,
              lambda t, l: [sys.executable, "hiring_cafe", t, l] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "scraper.py", t, l]),
             ("Jobgether", BASE_DIR if getattr(sys, 'frozen', False) else JOBGETHER_DIR,
              lambda t, l: [sys.executable, "jobgether", t, "15"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "jobgether_scraper.py", t, "15"]),
         ]
+
+        questions_thread = None
+        questions_proc = None
+
+        if self.scrape_questions_var.get():
+            def _questions_worker():
+                nonlocal questions_proc
+                q_cmd = (
+                    [sys.executable, "scrape_form_questions", "--continuous"]
+                    if getattr(sys, "frozen", False)
+                    else [sys.executable, "-u", "scrape_form_questions.py", "--continuous"]
+                )
+                self._log_platform("Questions", f"\n$ {' '.join(q_cmd)}\n\n")
+                with self._log_lock:
+                    fh = self._platform_log_fhs.get("Questions")
+                    if fh:
+                        fh.write(stamp_log_line(f"$ {' '.join(q_cmd)}\n\n"))
+                        fh.flush()
+
+                try:
+                    questions_proc = subprocess.Popen(
+                        q_cmd,
+                        cwd=CURRENT_DIR,
+                        stdin=subprocess.PIPE,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                        creationflags=(0x08000000 if sys.platform == "win32" else 0),
+                        env=os.environ.copy()
+                    )
+                except Exception as e:
+                    msg = f"Failed to launch Questions Scraper: {e}\n"
+                    self._log_platform("Questions", msg)
+                    with self._log_lock:
+                        fh = self._platform_log_fhs.get("Questions")
+                        if fh:
+                            fh.write(stamp_log_line(msg))
+                            fh.flush()
+                    return
+
+                with self._procs_lock:
+                    self._current_procs.add(questions_proc)
+
+                try:
+                    for line in questions_proc.stdout:
+                        self._log_platform("Questions", line)
+                        with self._log_lock:
+                            fh = self._platform_log_fhs.get("Questions")
+                            if fh:
+                                fh.write(stamp_log_line(line))
+                                fh.flush()
+                except Exception:
+                    pass
+                finally:
+                    if questions_proc is not None:
+                        try:
+                            questions_proc.wait(timeout=3)
+                        except Exception:
+                            pass
+                        with self._procs_lock:
+                            self._current_procs.discard(questions_proc)
+
+            questions_thread = threading.Thread(target=_questions_worker, daemon=True)
+            questions_thread.start()
 
         worker_threads = [
             threading.Thread(target=_platform_worker, args=cfg, daemon=True)
@@ -2085,6 +2329,19 @@ class ScraperPanel(tk.Frame):
         for t in worker_threads:
             t.join()
 
+        # Job scrapers have finished scraping all keywords.
+        # Now notify Questions Scraper to finish processing all remaining jobs in the sheet!
+        if questions_thread and questions_proc and not self._stop_requested:
+            self._log("\n--- Job scrapers finished. Continuing form questions scraping until all jobs in the Google Sheet are scraped... ---\n")
+            self._set_status("Finishing form questions for all jobs in Google Sheet...", COLORS["running"])
+            try:
+                if questions_proc.stdin and not questions_proc.stdin.closed:
+                    questions_proc.stdin.write("DRAIN\n")
+                    questions_proc.stdin.flush()
+                    questions_proc.stdin.close()
+            except Exception:
+                pass
+            questions_thread.join()
 
         end_label = "stopped" if self._stop_requested else "finished"
         elapsed = format_duration(datetime.now() - run_start)
@@ -2738,9 +2995,7 @@ def run_auth_check(root):
                 f.write(env_content)
                 
             # Copy to subdirs so scrapers get it
-            for d in ['GlassD', 'Hiring_cafe', 'Jobgether', 'resume-bot']:
-                dpath = os.path.join(os.path.dirname(CURRENT_DIR), d)
-                if not os.path.exists(dpath): dpath = os.path.join(CURRENT_DIR, '..', 'scraper', d)
+            for dpath in [GLASSD_DIR, HIRINGCAFE_DIR, JOBGETHER_DIR, RESUMEBOT_DIR]:
                 if os.path.exists(dpath):
                     shutil.copy2(env_path, os.path.join(dpath, '.env'))
                     
@@ -2761,11 +3016,12 @@ def sync_configs():
     sa_src = os.path.join(current_dir, "service_account.json")
     
     targets = [
-        os.path.join(parent_dir, "Job-Bot"),
-        os.path.join(parent_dir, "scraper", "GlassD"),
-        os.path.join(parent_dir, "scraper", "Hiring_cafe"),
-        os.path.join(parent_dir, "scraper", "Jobgether"),
-        os.path.join(parent_dir, "resume-bot"),
+        JOBBOT_DIR,
+        GLASSD_DIR,
+        HIRINGCAFE_DIR,
+        JOBGETHER_DIR,
+        RESUMEBOT_DIR,
+        os.path.join(parent_dir, "cover-letter-bot"),
     ]
     
     for t in targets:
