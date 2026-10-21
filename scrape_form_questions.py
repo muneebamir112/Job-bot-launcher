@@ -33,7 +33,6 @@ SCOPES = [
 ]
 
 GOOGLE_SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
-GOOGLE_DOC_ID = os.getenv("GOOGLE_DOC_ID", "").strip()
 SERVICE_ACCOUNT_FILE = os.path.join(CURRENT_DIR, "service_account.json")
 if not os.path.exists(SERVICE_ACCOUNT_FILE):
     alt_sa = os.path.join(BASE_DIR, "service_account.json")
