@@ -2048,42 +2048,42 @@ class ScraperPanel(tk.Frame):
 
         self._log(f"Loaded {len(titles)} job titles from Sheet2\n")
 
-        for idx, (title, location) in enumerate(titles, start=1):
-            if self._stop_requested:
-                break
+        self._set_status(f"Scraping {len(titles)} titles across platforms", COLORS["running"])
 
-            self._log(f"\n--- [{idx}/{len(titles)}] {title} | {location} ---\n")
-            self._set_status(f"[{idx}/{len(titles)}] {title}", COLORS["running"])
+        def _platform_worker(label, cwd, cmd_builder):
+            for idx, (title, location) in enumerate(titles, start=1):
+                if self._stop_requested:
+                    break
+                header_msg = f"\n--- [{idx}/{len(titles)}] {title} | {location} ---\n"
+                self._log_platform(label, header_msg)
+                with self._log_lock:
+                    fh = self._platform_log_fhs.get(label)
+                    if fh:
+                        fh.write(stamp_log_line(header_msg))
+                        fh.flush()
 
-            platform_specs = [
-                ("Glassdoor", BASE_DIR if getattr(sys, 'frozen', False) else GLASSD_DIR,
-                 [sys.executable, "glassdoor", title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", title, location]),
-                ("Hiring Cafe", BASE_DIR if getattr(sys, 'frozen', False) else HIRINGCAFE_DIR,
-                 [sys.executable, "hiring_cafe", title, location] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "scraper.py", title, location]),
-                ("Jobgether", BASE_DIR if getattr(sys, 'frozen', False) else JOBGETHER_DIR,
-                 [sys.executable, "jobgether", title, "15"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "jobgether_scraper.py", title, "15"]),
-            ]
-            # Run all 3 platforms for this keyword at once - independent
-            # subprocesses with their own Chrome profiles, so nothing is
-            # shared between them. The next keyword doesn't start until all
-            # 3 of these finish.
-            results = {}
+                cmd = cmd_builder(title, location)
+                clean = self._run_platform(label, cwd, cmd)
+                if not clean and not self._stop_requested:
+                    self._log_platform(label, f"  {title} | {location}: did not finish cleanly\n")
 
-            def _run_and_record(label, cwd, cmd):
-                results[label] = self._run_platform(label, cwd, cmd)
+        platform_configs = [
+            ("Glassdoor", BASE_DIR if getattr(sys, 'frozen', False) else GLASSD_DIR,
+             lambda t, l: [sys.executable, "glassdoor", t, l] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "glassdoor_scraper_final.py", t, l]),
+            ("Hiring Cafe", BASE_DIR if getattr(sys, 'frozen', False) else HIRINGCAFE_DIR,
+             lambda t, l: [sys.executable, "hiring_cafe", t, l] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "scraper.py", t, l]),
+            ("Jobgether", BASE_DIR if getattr(sys, 'frozen', False) else JOBGETHER_DIR,
+             lambda t, l: [sys.executable, "jobgether", t, "15"] if getattr(sys, 'frozen', False) else [sys.executable, "-u", "jobgether_scraper.py", t, "15"]),
+        ]
 
-            platform_threads = [
-                threading.Thread(target=_run_and_record, args=spec, daemon=True)
-                for spec in platform_specs
-            ]
-            for t in platform_threads:
-                t.start()
-            for t in platform_threads:
-                t.join()
-
-            failed = [label for label, *_ in platform_specs if not results.get(label)]
-            if not self._stop_requested and failed:
-                self._log(f"  {title} | {location}: {', '.join(failed)} did not finish cleanly\n")
+        worker_threads = [
+            threading.Thread(target=_platform_worker, args=cfg, daemon=True)
+            for cfg in platform_configs
+        ]
+        for t in worker_threads:
+            t.start()
+        for t in worker_threads:
+            t.join()
 
 
         end_label = "stopped" if self._stop_requested else "finished"
